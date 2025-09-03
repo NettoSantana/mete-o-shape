@@ -150,3 +150,6 @@ if __name__ == "__main__":
     # usa 8080 se PORT estiver vazia ou não existir
     port = int(os.getenv("PORT") or "8080")
     app.run(host="0.0.0.0", port=port)
+@app.get("/")
+def root():
+    return {"ok": True, "project": PROJECT_NAME}
