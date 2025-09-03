@@ -73,6 +73,33 @@ def _normalize_from_choice(kind: str, choice: str) -> int:
     if kind == "idade":  return _mid(RANGE_IDADE.get(choice,  (30,35)))
     return 0
 
+# --------- Geradores simples de conteúdo ---------
+def gerar_cardapio(cal: int) -> str:
+    # distribuição simples por refeição (MVP)
+    # ajuste proporcional (mantendo ideias básicas)
+    pct = {"cafe": 0.20, "lanche1": 0.10, "almoco": 0.30, "lanche2": 0.10, "jantar": 0.25, "ceia": 0.05}
+    def bloco(nome, kcal):
+        return f"{nome}: ~{int(kcal)} kcal\n- Opção 1: ovos + tapioca/aveia\n- Opção 2: iogurte + granola + fruta\n- Opção 3: sanduíche de frango (pão integral)"
+    return (
+        "🍽️ Cardápio do dia (exemplo)\n"
+        + bloco("Café", cal*pct["cafe"])
+        + "\n" + bloco("Lanche manhã", cal*pct["lanche1"])
+        + "\n" + bloco("Almoço", cal*pct["almoco"])
+        + "\n" + bloco("Lanche tarde", cal*pct["lanche2"])
+        + "\n" + bloco("Jantar (pré-treino)", cal*pct["jantar"])
+        + "\n" + bloco("Ceia", cal*pct["ceia"])
+        + "\n\nDica: mantenha proteína em todas as refeições."
+    )
+
+def gerar_treino_abc() -> str:
+    return (
+        "🏋️ Treino ABC (exemplo)\n"
+        "A (Peito/Ombro/Tríceps): supino, crucifixo, desenvolvimento, tríceps testa\n"
+        "B (Costas/Bíceps): remada, puxada, levantamento terra, rosca direta\n"
+        "C (Pernas/Abdômen): agachamento, stiff, leg press, prancha\n"
+        "Séries 3–4, reps 8–12, descanso 60–90s.\n"
+    )
+
 @app.post("/bot")
 def bot():
     db = load_db()
@@ -85,7 +112,7 @@ def bot():
 
     # comandos rápidos
     if body in ("menu", "help", "ajuda"):
-        resp.message("Digite 'iniciar' para começar a anamnese ou 'status' para ver seu plano.")
+        resp.message("Comandos: iniciar | status | cardapio | treino | reiniciar")
         return str(resp)
 
     if body in ("reset", "reiniciar"):
@@ -93,6 +120,20 @@ def bot():
         db.setdefault("users", {})[from_phone] = user
         save_db(db)
         resp.message("Dados apagados. Digite 'iniciar' para recomeçar.")
+        return str(resp)
+
+    # NOVO: cardápio do dia
+    if body in ("cardapio", "cardápio"):
+        prof = user.get("profile")
+        if not prof:
+            resp.message("Sem dados ainda. Digite 'iniciar' primeiro.")
+            return str(resp)
+        resp.message(gerar_cardapio(prof["calories"]))
+        return str(resp)
+
+    # NOVO: treino ABC
+    if body in ("treino", "abc"):
+        resp.message(gerar_treino_abc())
         return str(resp)
 
     if body in ("status",):
@@ -104,7 +145,8 @@ def bot():
             f"🎯 Objetivo: {prof['goal_name']}\n"
             f"🔥 Calorias meta: {prof['calories']} kcal\n"
             f"🧮 Macros (g): P{prof['protein']} C{prof['carbs']} G{prof['fat']}\n"
-            f"💧 Água: {prof['water_ml']} ml/dia"
+            f"💧 Água: {prof['water_ml']} ml/dia\n"
+            "➡️ Próximos: digite 'cardapio' ou 'treino'."
         )
         resp.message(msg)
         return str(resp)
@@ -143,7 +185,9 @@ def bot():
     tdee = tmb * act_factor
     calories = int(round(tdee * (1 + goal_factor), 0))
     protein, carbs, fat = split_macros(calories)
-    water_ml = int(round(peso_kg * 37.5)) * 10  # ~35–40 ml/kg
+
+    # CORREÇÃO: ~35–40 ml/kg => sem multiplicador extra
+    water_ml = int(round(peso_kg * 37.5))  # antes estava 10x maior
 
     user["profile"] = {
         "sex": sexo,
@@ -171,7 +215,7 @@ def bot():
         f"• 🎯 Calorias meta: {calories} kcal\n"
         f"• 🧮 Macros (g): P{protein} C{carbs} G{fat}\n"
         f"• 💧 Água/dia: {water_ml} ml\n\n"
-        "Digite 'status' para ver de novo ou 'reiniciar' para refazer."
+        "➡️ Próximo: digite 'cardapio' para receber o cardápio do dia, ou 'treino' para o ABC."
     )
     resp.message(result)
     return str(resp)
