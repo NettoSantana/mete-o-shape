@@ -1,1 +1,1 @@
-﻿web: gunicorn -w 1 -b 0.0.0.0: server:app
+web: python server.py
