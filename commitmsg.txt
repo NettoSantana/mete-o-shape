@@ -1,1 +1,6 @@
-﻿feat(flow): boas-vindas + captura de nome; validação anti-trava nas escolhas; continuidade com cardapio/treino; água corrigida
+﻿feat(server): aceitar GET em /bot (health-check) e manter POST/TwiML
+
+- /bot agora responde GET (200 OK texto) e POST (Twilio WhatsApp)
+- Adicionado /admin/ping para health-check explícito
+- Estrutura simples de fluxo (ping/menu/eco) em build_reply()
+- Preferência por waitress em produção; fallback Flask dev
