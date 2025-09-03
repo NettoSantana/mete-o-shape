@@ -2,3 +2,4 @@
 python-dotenv==1.0.1
 Twilio==9.2.3
 pytz==2024.1
+waitress==2.1.2
