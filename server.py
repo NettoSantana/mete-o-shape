@@ -39,12 +39,12 @@ def split_macros(calories: int, p_ratio=0.30, c_ratio=0.40, f_ratio=0.30) -> Tup
     return p, c, f
 
 QUESTIONS = [
-    ("sexo", "Qual seu sexo?\\n1) Masculino\\n2) Feminino"),
-    ("idade", "Sua idade? (anos)\\n1) <18\\n2) 18–25\\n3) 26–35\\n4) 36–45\\n5) 46–55\\n6) >55"),
-    ("altura", "Sua altura?\\n1) <1,60\\n2) 1,60–1,70\\n3) 1,71–1,80\\n4) 1,81–1,90\\n5) >1,90"),
-    ("peso", "Seu peso atual?\\n1) <60\\n2) 61–75\\n3) 76–90\\n4) 91–105\\n5) >105"),
-    ("atividade", "Nível de atividade?\\n1) Sedentário\\n2) Leve\\n3) Moderado\\n4) Alto\\n5) Atleta"),
-    ("objetivo", "Objetivo principal?\\n1) Emagrecimento\\n2) Definição\\n3) Manutenção\\n4) Ganho de Massa"),
+    ("sexo", "Qual seu sexo?\n1) Masculino\n2) Feminino"),
+    ("idade", "Sua idade? (anos)\n1) <18\n2) 18–25\n3) 26–35\n4) 36–45\n5) 46–55\n6) >55"),
+    ("altura", "Sua altura?\n1) <1,60\n2) 1,60–1,70\n3) 1,71–1,80\n4) 1,81–1,90\n5) >1,90"),
+    ("peso", "Seu peso atual?\n1) <60\n2) 61–75\n3) 76–90\n4) 91–105\n5) >105"),
+    ("atividade", "Nível de atividade?\n1) Sedentário\n2) Leve\n3) Moderado\n4) Alto\n5) Atleta"),
+    ("objetivo", "Objetivo principal?\n1) Emagrecimento\n2) Definição\n3) Manutenção\n4) Ganho de Massa"),
 ]
 
 @app.post("/bot")
@@ -72,9 +72,9 @@ def bot():
             resp.message("Sem dados ainda. Digite 'iniciar'.")
             return str(resp)
         msg = (
-            f"🎯 Objetivo: {prof['goal_name']}\\n"
-            f"🔥 Calorias meta: {prof['calories']} kcal\\n"
-            f"🧮 Macros (g): P{prof['protein']} C{prof['carbs']} G{prof['fat']}\\n"
+            f"🎯 Objetivo: {prof['goal_name']}\n"
+            f"🔥 Calorias meta: {prof['calories']} kcal\n"
+            f"🧮 Macros (g): P{prof['protein']} C{prof['carbs']} G{prof['fat']}\n"
             f"💧 Água: {prof['water_ml']} ml/dia"
         )
         resp.message(msg)
@@ -131,12 +131,12 @@ def bot():
     db["users"][from_phone] = user
     save_db(db)
     result = (
-        "✅ Pronto! Este é seu plano inicial:\\n"
-        f"• TMB: {int(round(tmb))} kcal\\n"
-        f"• TDEE (atividade {act_name}): {int(round(tdee))} kcal\\n"
-        f"• 🎯 Calorias meta: {calories} kcal\\n"
-        f"• 🧮 Macros (g): P{protein} C{carbs} G{fat}\\n"
-        f"• 💧 Água/dia: {water_ml} ml\\n\\n"
+        "✅ Pronto! Este é seu plano inicial:\n"
+        f"• TMB: {int(round(tmb))} kcal\n"
+        f"• TDEE (atividade {act_name}): {int(round(tdee))} kcal\n"
+        f"• 🎯 Calorias meta: {calories} kcal\n"
+        f"• 🧮 Macros (g): P{protein} C{carbs} G{fat}\n"
+        f"• 💧 Água/dia: {water_ml} ml\n\n"
         "Digite 'status' para ver de novo ou 'reiniciar' para refazer."
     )
     resp.message(result)
@@ -147,4 +147,6 @@ def ping():
     return {"ok": True, "project": PROJECT_NAME}
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+    # usa 8080 se PORT estiver vazia ou não existir
+    port = int(os.getenv("PORT") or "8080")
+    app.run(host="0.0.0.0", port=port)
