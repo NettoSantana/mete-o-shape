@@ -1,0 +1,1 @@
+﻿feat(flow): boas-vindas + captura de nome; validação anti-trava nas escolhas; continuidade com cardapio/treino; água corrigida
