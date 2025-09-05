@@ -1,6 +1,5 @@
-﻿feat(server): aceitar GET em /bot (health-check) e manter POST/TwiML
-
-- /bot agora responde GET (200 OK texto) e POST (Twilio WhatsApp)
-- Adicionado /admin/ping para health-check explícito
-- Estrutura simples de fluxo (ping/menu/eco) em build_reply()
-- Preferência por waitress em produção; fallback Flask dev
+﻿feat(server): blindar rotas e 404
+- strict_slashes=False (aceita /bot e /bot/)
+- rota '/' com mensagem de orientação
+- handler 404 amigável
+- mantém /bot GET (200) e POST (TwiML)
