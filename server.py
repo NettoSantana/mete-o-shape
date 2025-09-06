@@ -1,17 +1,20 @@
 ﻿def build_reply(body: str, sender: str) -> str:
     """
-    Menu real (topo) e respostas objetivas.
-    - 'menu' ou '0' -> mostra opções
-    - '1' -> Mete o Shape
-    - '2' -> Cardápio/Pedidos
-    - '3' -> Assistente Educacional
-    - 'ping' -> healthcheck
+    Responde mensagens recebidas via WhatsApp.
+    - 'menu' ou '0' → mostra o menu principal
+    - '1' → Mete o Shape
+    - '2' → Cardápio/Pedidos
+    - '3' → Assistente Educacional
+    - 'ping' → healthcheck
+    - fallback → instrução para voltar ao menu
     """
     text = (body or "").strip().lower()
 
+    # Healthcheck
     if text in {"ping", "status", "up"}:
-        return "✅ Online.\nUse 'menu' para ver opções."
+        return "✅ Online.\nDigite 'menu' para ver as opções."
 
+    # Menu principal
     if text in {"menu", "0"}:
         return (
             "📋 MENU PRINCIPAL\n"
@@ -21,10 +24,11 @@
             "\nResponda com 1, 2 ou 3."
         )
 
+    # Opções
     if text == "1":
         return (
             "🏋️ METE O SHAPE\n"
-            "Esqueleto ativo ✅\n"
+            "Status: esqueleto ativo ✅\n"
             "➡️ Fluxo: Anamnese → Macros → Cardápio/Treino diário.\n"
             "Digite 'menu' para voltar."
         )
@@ -45,5 +49,5 @@
             "Digite 'menu' para voltar."
         )
 
-    # Fallback sem eco
+    # Fallback
     return "❓ Não entendi.\nDigite 'menu' para ver as opções."
