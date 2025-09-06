@@ -10,6 +10,7 @@
     """
     text = (body or "").strip().lower()
 
+    # Respostas de cada módulo
     menus = {
         "1": (
             "🏋️ METE O SHAPE\n"
@@ -31,19 +32,24 @@
         ),
     }
 
+    # Healthcheck
     if text in {"ping", "status", "up"}:
         return "✅ Online.\nDigite 'menu' para ver as opções."
 
+    # Menu principal
     if text in {"menu", "0"}:
-        return (
-            "📋 MENU PRINCIPAL\n"
-            "1️⃣ 🏋️ Mete o Shape — treino/dieta via WhatsApp\n"
-            "2️⃣ 🍔 Cardápio/Pedidos — escolher no site e fechar pelo WhatsApp\n"
-            "3️⃣ 📚 Assistente Educacional — MAT/PT/Leitura\n"
-            "\nResponda com 1, 2 ou 3."
+        opcoes = "\n".join(
+            [
+                "1️⃣ 🏋️ Mete o Shape — treino/dieta via WhatsApp",
+                "2️⃣ 🍔 Cardápio/Pedidos — escolher no site e fechar pelo WhatsApp",
+                "3️⃣ 📚 Assistente Educacional — MAT/PT/Leitura",
+            ]
         )
+        return f"📋 MENU PRINCIPAL\n{opcoes}\n\nResponda com 1, 2 ou 3."
 
+    # Seleção de módulo
     if text in menus:
         return menus[text]
 
+    # Fallback
     return "❓ Não entendi.\nDigite 'menu' para ver as opções."
