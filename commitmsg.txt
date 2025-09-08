@@ -1,6 +1,7 @@
-﻿feat(ms): anamnese guiada por múltipla escolha com estado em JSON
+﻿refactor(ms/server): fluxo estável, TwiML garantido e logs de saída
 
-- Boas-vindas motivacional
-- Q1..Q7 (sexo, idade, peso, altura, objetivo, atividade, preferência)
-- Resumo + confirmação
-- Comandos: 'oi' inicia, 'reiniciar' reseta, 'ping' health
+- Boas-vindas só em step==0 (não reseta com 'oi/ola' no meio)
+- /bot com try/except + fallback quando reply vazio
+- Content-Type XML com charset utf-8
+- UID por WaId; persistência com fallback db.json
+- /health adicionado; logs com preview da resposta
