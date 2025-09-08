@@ -1,6 +1,6 @@
 ﻿# server.py — Mete o Shape (WhatsApp) + health-check
 import os, json, logging, threading
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
 from flask import Flask, request, Response
 
 # Twilio TwiML (fallback seguro p/ ambiente local sem Twilio)
@@ -103,12 +103,13 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         st["data"] = {}
         users[uid] = st
         save_db(db)
-        text = "oi"
-        step = 0
-        data = {}
+        return "🔁 Anamnese reiniciada. Digite **oi** para começar."
 
-    # ---- Step 0 → Q1 (saudação)
-    if step == 0 or text in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}:
+    # ---- Step 0 → Q1 (saudação) — ATENÇÃO: só quando step == 0
+    if step == 0:
+        if text not in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}:
+            # se o usuário falar qualquer coisa antes de iniciar
+            return "👋 Digite **oi** para iniciar sua anamnese."
         st["step"] = 1
         st["data"] = {}
         users[uid] = st
@@ -121,6 +122,10 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
             "2️⃣ Feminino\n"
             "_Responda com 1 ou 2._"
         )
+
+    # Se o usuário digitar oi/ola no meio do fluxo, não resetar:
+    if text in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"} and step > 0 and step < 100:
+        return "ℹ️ Já estamos no processo. Se quiser reiniciar, digite **reiniciar**."
 
     # ---- Q1 → Q2 (sexo)
     if step == 1:
@@ -279,7 +284,12 @@ def create_app() -> Flask:
         waid: Optional[str] = request.values.get("WaId")
         log.info(f"POST /bot <- From={sender} WaId={waid} Body='{body}'")
 
-        reply_text = build_reply(body=body, sender=sender, waid=waid)
+        try:
+            reply_text = build_reply(body=body, sender=sender, waid=waid)
+        except Exception as e:
+            app.logger.exception(f"Erro no build_reply: {e}")
+            reply_text = "⚠️ Tive um erro aqui. Mande **reiniciar** ou **oi** para seguir."
+
         twiml = MessagingResponse()
         twiml.message(reply_text)
         return Response(str(twiml), 200, mimetype="application/xml")
@@ -304,5 +314,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
-
-        
