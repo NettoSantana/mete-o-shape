@@ -296,7 +296,7 @@ print("[server] app criado")
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8080"))
-    host = os.getenv("HOST", "0.0.0.0"))
+    host = os.getenv("HOST", "0.0.0.0")
     try:
         from waitress import serve
         print(f"[server] Servindo com waitress em http://{host}:{port}")
@@ -304,3 +304,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
+
+        
