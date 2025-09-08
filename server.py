@@ -45,7 +45,9 @@ except Exception:  # pragma: no cover
     def load_db() -> Dict[str, Any]: return _load_db_local()
     def save_db(db: Dict[str, Any]) -> None: _save_db_local(db)
 
-# ===================== Helpers de normalização =====================
+# ===================== Helpers =====================
+START_WORDS = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}
+
 def _digits_only(s: Optional[str]) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
@@ -53,6 +55,10 @@ def _uid_from(sender: str, waid: Optional[str]) -> str:
     # Prioriza WaId (estável), senão From, senão anon
     d = _digits_only(waid or "") or _digits_only(sender or "")
     return d or (sender or "anon")
+
+def _safe_reply(text: Optional[str]) -> str:
+    t = (text or "").strip()
+    return t if t else "⚠️ Não entendi. Digite **oi** para iniciar ou **reiniciar** para recomeçar."
 
 # Mapas de faixas → valores estimados (para cálculos futuros)
 AGE_MAP = {  # (low, high, mid)
@@ -105,10 +111,9 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         save_db(db)
         return "🔁 Anamnese reiniciada. Digite **oi** para começar."
 
-    # ---- Step 0 → Q1 (saudação) — ATENÇÃO: só quando step == 0
+    # ---- Step 0 → Q1 (saudação) — apenas quando step == 0
     if step == 0:
-        if text not in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}:
-            # se o usuário falar qualquer coisa antes de iniciar
+        if text not in START_WORDS:
             return "👋 Digite **oi** para iniciar sua anamnese."
         st["step"] = 1
         st["data"] = {}
@@ -124,7 +129,7 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         )
 
     # Se o usuário digitar oi/ola no meio do fluxo, não resetar:
-    if text in {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"} and step > 0 and step < 100:
+    if text in START_WORDS and 0 < step < 100:
         return "ℹ️ Já estamos no processo. Se quiser reiniciar, digite **reiniciar**."
 
     # ---- Q1 → Q2 (sexo)
@@ -233,7 +238,7 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
     # ---- Confirmação final
     if step == 8:
         if text == "1":
-            st["step"] = 100  # marcado como concluído (pronto p/ cálculos de metas)
+            st["step"] = 100  # concluído (pronto p/ cálculos de metas)
             users[uid] = st
             save_db(db)
             return (
@@ -246,7 +251,7 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
             return "🔁 Anamnese reiniciada. Digite **oi** para começar."
         return "❗ Responda **1** para Confirmar ou **2** para Reiniciar."
 
-    # ---- Pós-conclusão: lembrete de comando
+    # ---- Pós-conclusão
     if step >= 100:
         return (
             "✅ Anamnese concluída.\n"
@@ -273,6 +278,10 @@ def create_app() -> Flask:
     def admin_ping():
         return Response("OK /admin/ping", 200, mimetype="text/plain")
 
+    @app.route("/health", methods=["GET"])
+    def health():
+        return Response("ok", 200, mimetype="text/plain")
+
     @app.route("/bot", methods=["GET", "POST"])
     def bot():
         if request.method == "GET":
@@ -285,14 +294,17 @@ def create_app() -> Flask:
         log.info(f"POST /bot <- From={sender} WaId={waid} Body='{body}'")
 
         try:
-            reply_text = build_reply(body=body, sender=sender, waid=waid)
+            reply_text = _safe_reply(build_reply(body=body, sender=sender, waid=waid))
         except Exception as e:
             app.logger.exception(f"Erro no build_reply: {e}")
             reply_text = "⚠️ Tive um erro aqui. Mande **reiniciar** ou **oi** para seguir."
 
+        # log da saída (curto)
+        log.info("POST /bot -> Reply='%s...'", (reply_text or "")[:120].replace("\n"," "))
+
         twiml = MessagingResponse()
         twiml.message(reply_text)
-        return Response(str(twiml), 200, mimetype="application/xml")
+        return Response(str(twiml), 200, mimetype="application/xml; charset=utf-8")
 
     @app.errorhandler(404)
     def not_found(_e):
