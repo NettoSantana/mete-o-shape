@@ -1,9 +1,9 @@
-﻿feat(ms): fluxo completo Anamnese → Treino → Alimentação
+﻿feat(ms): fluxo completo conforme roteiro — cardápio exemplo, hidratação, treino ABC, cron diário/semana
 
-- Q1–Q7 (anamnese) com confirmação
-- Q8–Q10 (treino): frequência, lesão, ênfase (múltipla escolha)
-- Q11 (alimentação): nº de refeições
-- Cálculos: TMB (Mifflin), GET por atividade, ajuste por objetivo
-- Macros: P=2.0 g/kg, G=25% kcal, C=resto
-- Split por refeição (kcal/P/C/G)
-- Estados: 0..12..20..999; reiniciar/status mantidos
+- Anamnese com Restrições/Observações (texto se “Outras”)
+- Resultados Iniciais: TMB, TDEE, calorias-meta, macros
+- Plano Alimentar: split 3–6 refs + cardápio exemplo
+- Hidratação: 35–40 ml/kg (divisão manhã/tarde/noite)
+- Treino ABC padrão (3x ou 6x)
+- Lembretes automáticos + check-in semanal via /admin/cron
+- Comandos: PAUSAR / ATIVAR lembretes

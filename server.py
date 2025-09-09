@@ -1,8 +1,8 @@
 ﻿# server.py — Mete o Shape (WhatsApp) + health-check
-# Fluxo: Boas-vindas → Anamnese → Resultados Iniciais → Plano Alimentar (cardápio exemplo) → Hidratação → Treino ABC
-#        → Mensagens diárias automáticas → Check-in semanal
-import os, json, logging, threading, math, time
-from datetime import datetime, timedelta
+# Fluxo: Boas-vindas → Q0 Nome → Anamnese → Resultados Iniciais → Plano Alimentar (cardápio exemplo)
+#        → Hidratação → Treino ABC → Mensagens diárias automáticas → Check-in semanal
+import os, json, logging, threading, math
+from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
 from flask import Flask, request, Response
 
@@ -24,7 +24,9 @@ except Exception:  # pragma: no cover
     TwilioClient = None
 
 APP_NAME = os.getenv("PROJECT_NAME", "mete_o_shape")
-TZ = os.getenv("TZ", "America/Sao_Paulo")
+# >>> Ajuste de fuso horário dos lembretes <<<
+# Use TZ=America/Bahia no ambiente
+TZ = os.getenv("TZ", "America/Bahia")
 
 # ===================== Storage (com fallback local) =====================
 DB_PATH = os.getenv("DB_PATH", "db.json")
@@ -81,6 +83,36 @@ def _now_br() -> datetime:
         return datetime.now(ZoneInfo(TZ))
     except Exception:
         return datetime.now()
+
+def _clamp_hour(h: int) -> int:
+    return max(0, min(23, int(h)))
+
+def _parse_hh_range(s: str) -> Optional[Tuple[int,int]]:
+    """'HH–HH' ou 'HH-HH' → (start,end) horas [0..23]"""
+    s = (s or "").replace(" ", "").replace("—","-").replace("–","-")
+    if "-" not in s: return None
+    a,b = s.split("-",1)
+    try:
+        A = _clamp_hour(int(a)); B = _clamp_hour(int(b))
+        return (A,B)
+    except Exception:
+        return None
+
+def _in_window(hour: int, A: int, B: int) -> bool:
+    """Retorna True se 'hour' está dentro da janela [A..B] inclusive, considerando A<=B.
+       Se A>B (não usual para feeding_window), considera janela vazia."""
+    if A <= B:
+        return A <= hour <= B
+    return False
+
+def _in_mute(hour: int, M: int, N: int) -> bool:
+    """Silêncio pode cruzar meia-noite (ex.: 22–05)."""
+    if M == N:  # silêncio 24h (edge raro)
+        return True
+    if M < N:
+        return M <= hour < N
+    else:
+        return hour >= M or hour < N
 
 # Mapas de faixas → valores estimados (para cálculos)
 AGE_MAP = {
@@ -156,9 +188,12 @@ def _apply_objective(cal_get: float, objetivo: str) -> float:
     return cal_get * (1.0 + adj)
 
 def _calc_macros(peso_kg: float, cal_alvo: float) -> Tuple[int, int, int]:
-    prot_g  = max(1.6, min(2.4, 2.0)) * peso_kg  # 2.0 g/kg com guard
+    # Proteína: 2.0 g/kg (com guard entre 1.6 e 2.4)
+    prot_g  = max(1.6, min(2.4, 2.0)) * peso_kg
+    # Gorduras: 25% (9 kcal/g)
     gord_kcal = cal_alvo * 0.25
     gord_g = gord_kcal / 9.0
+    # Carboidratos: resto (4 kcal/g)
     cal_rest = cal_alvo - (prot_g * 4.0) - gord_kcal
     carb_g = max(0.0, cal_rest / 4.0)
     return _round_g(prot_g), _round_g(carb_g), _round_g(gord_g)
@@ -228,10 +263,9 @@ def _render_cardapio() -> str:
     return "\n".join(linhas)
 
 # ===================== Core do fluxo =====================
-def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
+def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optional[List[str]] = None) -> str:
     """
-    Fluxo — Boas-vindas → Anamnese (Q1–Q8) → Resultados Iniciais → Plano Alimentar (Q9 nº refeições) + cardápio
-             → Hidratação → Treino ABC → Encerramento
+    Fluxo — Boas-vindas → Q0 Nome → Anamnese (Q1–Q7) + fotos → Q8a–Q8c → Resultados Iniciais → Plano → ...
     Estado: users[uid] = { flow:'ms', step:int, data:{...}, schedule:{...} }
     Comandos: oi | reiniciar | status | ping
     """
@@ -247,105 +281,130 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
 
     # ---- Comandos utilitários
     if text in {"ping", "status", "up"}:
-        return "✅ Online. Digite **oi** para iniciar sua anamnese."
+        return "✅ Online. Digite **oi** para iniciar."
     if text in {"reiniciar", "reset", "recomeçar", "recomecar"}:
         st["step"] = 0; st["data"] = {}; st["schedule"] = {"last": {}}
         users[uid] = st; save_db(db)
         return "🔁 Reiniciado. Digite **oi** para começar."
 
-    # ---- Step 0 → Q1 (saudação)
+    # ---- Step 0 → Q0 (saudação + NOME)
     if step == 0:
         if text not in START_WORDS:
             return "👋 Digite **oi** para iniciar."
         st["step"] = 1; st["data"] = {}; users[uid] = st; save_db(db)
         return (
             "👋 *Bem-vindo ao Mete o Shape* 🚀\n"
-            "Acompanhamento completo de nutrição, treino e motivação.\n"
-            "Vamos começar com perguntas rápidas pra montar seu plano.\n\n"
-            "**Q1. Sexo**\n"
-            "1️⃣ Masculino\n2️⃣ Feminino\n_Responda 1–2._"
+            "Aqui você terá acompanhamento completo de nutrição, treino e motivação.\n"
+            "Vamos começar rápido.\n\n"
+            "**Q0. Qual seu primeiro nome?**"
         )
 
     # oi/ola no meio do fluxo sem reset
     if text in START_WORDS and 0 < step < 999:
         return "ℹ️ Estamos no processo. Para recomeçar: **reiniciar**."
 
-    # ===================== ANAMNESE (seguindo seu roteiro) =====================
-    # Q1 → Q2 (Sexo)
+    # ===================== Q0 Nome =====================
     if step == 1:
+        nome = (body or "").strip()
+        if not nome or len(nome) < 2:
+            return "❗ Me diga seu primeiro nome (ex.: Carlos)."
+        data["nome"] = nome.split()[0].title()
+        st["step"] = 2; st["data"] = data; users[uid] = st; save_db(db)
+        return (
+            "**Q1. Sexo**\n"
+            "1️⃣ Masculino\n2️⃣ Feminino\n_Responda 1–2._"
+        )
+
+    # ===================== ANAMNESE =====================
+    # Q1 (Sexo) → Q2 (Faixa de idade)
+    if step == 2:
         if text not in {"1","2"}:
             return "❗ Responda **1** (Masculino) ou **2** (Feminino)."
         data["sexo"] = "Masculino" if text == "1" else "Feminino"
-        st["step"] = 2; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 3; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q2. Idade (faixa)**\n"
             "1️⃣ 16–24\n2️⃣ 25–34\n3️⃣ 35–44\n4️⃣ 45–54\n5️⃣ 55–64\n6️⃣ 65+\n_Responda 1–6._"
         )
 
-    # Q2 → Q3 (Idade)
-    if step == 2:
+    # Q2 (faixa) → Q2b (exata) → Q3 (altura)
+    if step == 3:
         if text not in AGE_MAP:
             return "❗ Idade: responda **1–6**."
         low, high, mid = AGE_MAP[text]
-        data["idade_faixa"] = f"{low}–{high}"; data["idade_estimada"] = mid
-        st["step"] = 3; st["data"] = data; users[uid] = st; save_db(db)
+        data["idade_faixa"] = f"{low}–{high}"
+        data["idade_estimada"] = mid
+        st["step"] = 4; st["data"] = data; users[uid] = st; save_db(db)
+        return "**Q2b. Qual sua idade EXATA (número)?**"
+
+    if step == 4:
+        # idade exata opcional (se inválida, fica com estimada)
+        try:
+            idade_exata = int("".join(ch for ch in (body or "") if ch.isdigit()))
+        except Exception:
+            idade_exata = 0
+        if 10 < idade_exata < 100:
+            data["idade_exata"] = idade_exata
+        else:
+            data["idade_exata"] = data.get("idade_estimada", 30)
+        st["step"] = 5; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q3. Altura (faixa)**\n"
             "1️⃣ <1,60 m\n2️⃣ 1,60–1,69 m\n3️⃣ 1,70–1,79 m\n4️⃣ 1,80–1,89 m\n5️⃣ ≥1,90 m\n_Responda 1–5._"
         )
 
-    # Q3 → Q4 (Altura)
-    if step == 3:
+    # Q3 Altura → Q4 Peso
+    if step == 5:
         if text not in HEIGHT_MAP:
             return "❗ Altura: responda **1–5**."
         low, high, mid = HEIGHT_MAP[text]
         data["altura_faixa"] = f"{low}–{high} cm" if high != 205 else "≥190 cm"
         data["altura_cm_est"] = mid
-        st["step"] = 4; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 6; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q4. Peso atual (faixa, kg)**\n"
             "1️⃣ <60\n2️⃣ 60–69\n3️⃣ 70–79\n4️⃣ 80–89\n5️⃣ 90–99\n6️⃣ 100+\n_Responda 1–6._"
         )
 
-    # Q4 → Q5 (Peso)
-    if step == 4:
+    # Q4 Peso → Q5 Atividade
+    if step == 6:
         if text not in WEIGHT_MAP:
             return "❗ Peso: responda **1–6**."
         low, high, mid = WEIGHT_MAP[text]
         data["peso_faixa"] = f"{low}–{high} kg" if high != 130 else "100+ kg"
         data["peso_kg_est"] = mid
-        st["step"] = 5; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 7; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q5. Nível de atividade física**\n"
             "1️⃣ Sedentário (0–1x/sem)\n2️⃣ Leve (2–3x/sem)\n3️⃣ Moderado (3–4x/sem)\n4️⃣ Intenso (5–6x/sem)\n_Responda 1–4._"
         )
 
-    # Q5 → Q6 (Atividade)
-    if step == 5:
+    # Q5 Atividade → Q6 Objetivo
+    if step == 7:
         if text not in {"1","2","3","4"}:
             return "❗ Atividade: responda **1–4**."
         atividade = {"1":"Sedentário","2":"Leve","3":"Moderado","4":"Intenso"}[text]
         data["atividade"] = atividade
-        st["step"] = 6; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 8; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q6. Objetivo principal**\n"
             "1️⃣ Emagrecimento\n2️⃣ Definição/Manutenção\n3️⃣ Ganho de massa\n_Responda 1–3._"
         )
 
-    # Q6 → Q7 (Objetivo)
-    if step == 6:
+    # Q6 Objetivo → Q7 Restrições
+    if step == 8:
         if text not in {"1","2","3"}:
             return "❗ Objetivo: responda **1–3**."
         objetivo = {"1":"Emagrecimento","2":"Manutenção","3":"Hipertrofia"}[text]
         data["objetivo"] = objetivo
-        st["step"] = 7; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 9; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q7. Restrições/observações**\n"
             "1️⃣ Sem restrições\n2️⃣ Intolerância à lactose\n3️⃣ Vegetariano\n4️⃣ Low-carb\n5️⃣ Outras\n_Responda 1–5._"
         )
 
-    # Q7 → Q8 (Restrições; se 'Outras', pedir texto livre)
-    if step == 7:
+    # Q7 → Observação livre (71) ou segue
+    if step == 9:
         if text not in {"1","2","3","4","5"}:
             return "❗ Responda **1–5**."
         restr_map = {
@@ -357,50 +416,153 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         }
         data["restricoes"] = restr_map[text]
         if text == "5":
-            st["step"] = 71; st["data"] = data; users[uid] = st; save_db(db)
+            st["step"] = 91; st["data"] = data; users[uid] = st; save_db(db)
             return "✍️ Digite sua observação em uma frase curta (ex.: alergia a ovos)."
-        # sem 'Outras' → segue
-        st["step"] = 8; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 10; st["data"] = data; users[uid] = st; save_db(db)
         return (
-            "✅ *Resumo rápido*\n"
-            f"Sexo: {data['sexo']} | Idade: {data['idade_faixa']} (~{data['idade_estimada']} a)\n"
-            f"Altura: {data['altura_faixa']} | Peso: {data['peso_faixa']}\n"
-            f"Atividade: {data['atividade']} | Objetivo: {data['objetivo']}\n"
-            f"Restrições: {data['restricoes']}\n\n"
-            "**Confirmar?**\n1️⃣ Confirmar\n2️⃣ Reiniciar"
+            "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
+            "1️⃣ Sim, vou enviar\n2️⃣ Pular por enquanto"
         )
 
-    # Q7.1 — Observação livre (texto curto)
-    if step == 71:
+    if step == 91:
         obs = (body or "").strip()
         if not obs:
             return "❗ Escreva uma observação curta (texto)."
         data["restricoes_obs"] = obs
-        st["step"] = 8; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 10; st["data"] = data; users[uid] = st; save_db(db)
+        return (
+            "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
+            "1️⃣ Sim, vou enviar\n2️⃣ Pular por enquanto"
+        )
+
+    # Q7c Fotos → se Sim, entra no step 92 aguardando mídias
+    if step == 10:
+        if text not in {"1","2"}:
+            return "❗ Responda **1** (Sim) ou **2** (Pular)."
+        if text == "1":
+            st["step"] = 92; users[uid] = st; save_db(db)
+            return "📸 Envie de 1 a 3 fotos agora (frente / lado / costas)."
+        # pular → segue para Q8a (treino)
+        st["step"] = 100; users[uid] = st; save_db(db)
+        return (
+            "**Q8a. Horário do TREINO**\n"
+            "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+            "_Responda 1–8._"
+        )
+
+    # Step 92: recebendo fotos
+    if step == 92:
+        fotos = data.get("fotos", [])
+        media_urls = media_urls or []
+        if media_urls:
+            fotos.extend(media_urls[:3])
+            data["fotos"] = fotos
+            st["data"] = data
+            # após fotos → Q8a (treino)
+            st["step"] = 100; users[uid] = st; save_db(db)
+            return (
+                "✅ Fotos recebidas.\n\n"
+                "**Q8a. Horário do TREINO**\n"
+                "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+                "_Responda 1–8._"
+            )
+        else:
+            return "❗ Não recebi imagem. Envie a(s) foto(s) agora ou digite **pular** para seguir."
+
+    if step == 92 and text == "pular":
+        st["step"] = 100; users[uid] = st; save_db(db)
+        return (
+            "➡️ Pulando fotos.\n\n"
+            "**Q8a. Horário do TREINO**\n"
+            "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+            "_Responda 1–8._"
+        )
+
+    # ===================== Q8a/Q8b/Q8c (perfil de alertas) =====================
+    if step == 100:
+        # Treino
+        opt = text
+        map_opt = {"1":6,"2":12,"3":17,"4":18,"5":19,"6":20}
+        if opt in map_opt:
+            data["training_hour"] = map_opt[opt]
+        elif opt == "7":
+            data["training_hour"] = None
+        elif opt == "8":
+            return "Digite a hora do treino (0–23), número inteiro."
+        else:
+            # pode ter digitado direto a hora
+            try:
+                h = _clamp_hour(int(opt))
+                data["training_hour"] = h
+            except Exception:
+                return "❗ Responda 1–8 ou uma hora válida (0–23)."
+        st["data"] = data; st["step"] = 101; users[uid] = st; save_db(db)
+        return (
+            "**Q8b. Janela de ALIMENTAÇÃO (HH–HH)**\n"
+            "1️⃣ 08–20  2️⃣ 07–21  3️⃣ 06–22  4️⃣ 10–18  5️⃣ Outra (digite HH–HH)\n"
+            "_Responda 1–5._"
+        )
+
+    if step == 101:
+        # feeding_window
+        preset = {"1":(8,20), "2":(7,21), "3":(6,22), "4":(10,18)}
+        if text in preset:
+            data["feeding_window"] = list(preset[text])
+        else:
+            rng = _parse_hh_range(body or "")
+            if not rng:
+                return "❗ Formato inválido. Envie no formato HH–HH (ex.: 08–20)."
+            data["feeding_window"] = [rng[0], rng[1]]
+        st["data"] = data; st["step"] = 102; users[uid] = st; save_db(db)
+        return (
+            "**Q8c. Silêncio/Não perturbe (HH–HH)**\n"
+            "1️⃣ 22–05  2️⃣ 23–06  3️⃣ 00–06  4️⃣ Não silenciar  5️⃣ Outra (HH–HH)\n"
+            "_Responda 1–5._"
+        )
+
+    if step == 102:
+        # mute_hours (pode cruzar meia-noite)
+        if text == "4":
+            data["mute_hours"] = None
+        elif text in {"1","2","3"}:
+            preset = {"1":(22,5), "2":(23,6), "3":(0,6)}
+            data["mute_hours"] = [preset[text][0], preset[text][1]]
+        else:
+            rng = _parse_hh_range(body or "")
+            if not rng:
+                return "❗ Formato inválido. Envie HH–HH (ex.: 22–05) ou escolha 1–4."
+            data["mute_hours"] = [rng[0], rng[1]]
+        st["data"] = data; st["step"] = 11; users[uid] = st; save_db(db)
+        # segue para confirmação como antes:
+        nome = data.get("nome","")
         return (
             "✅ *Resumo rápido*\n"
-            f"Sexo: {data['sexo']} | Idade: {data['idade_faixa']} (~{data['idade_estimada']} a)\n"
+            f"Nome: {nome}\n"
+            f"Sexo: {data['sexo']} | Idade: {data.get('idade_exata', data.get('idade_estimada'))} anos\n"
             f"Altura: {data['altura_faixa']} | Peso: {data['peso_faixa']}\n"
             f"Atividade: {data['atividade']} | Objetivo: {data['objetivo']}\n"
-            f"Restrições: {data.get('restricoes')} ({data.get('restricoes_obs')})\n\n"
+            f"Restrições: {data.get('restricoes')} {('('+data.get('restricoes_obs','')+')') if data.get('restricoes_obs') else ''}\n"
+            f"Treino: {('sem treino' if data.get('training_hour') is None else str(data.get('training_hour'))+'h')}\n"
+            f"Janela: {tuple(data.get('feeding_window',[8,20]))}\n"
+            f"Silêncio: {('nenhum' if data.get('mute_hours') in (None,[]) else tuple(data.get('mute_hours')))}\n\n"
             "**Confirmar?**\n1️⃣ Confirmar\n2️⃣ Reiniciar"
         )
 
-    # Confirmação → Resultados Iniciais (calcula TMB/TDEE/Calorias/Macros)
-    if step == 8:
+    # Confirmação → Resultados Iniciais
+    if step == 11:
         if text == "2":
             st["step"] = 0; st["data"] = {}; users[uid] = st; save_db(db)
             return "🔁 Reiniciado. Digite **oi** para começar."
         if text != "1":
             return "❗ Responda **1** para Confirmar ou **2** para Reiniciar."
 
-        # cálculos
         sexo   = data.get("sexo", "Masculino")
-        idade  = int(data.get("idade_estimada", 30))
+        idade  = int(data.get("idade_exata", data.get("idade_estimada", 30)))
         peso   = float(data.get("peso_kg_est", 75.0))
         altura = float(data.get("altura_cm_est", 175.0))
         objetivo  = data.get("objetivo", "Manutenção")
         atividade = data.get("atividade", "Leve")
+        nome      = data.get("nome","")
 
         tmb = _calc_tmb_mifflin(sexo, peso, altura, idade)
         tdee = _calc_get(tmb, atividade)
@@ -415,19 +577,19 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
             "prot_g": prot_g, "carb_g": carb_g, "gord_g": gord_g
         })
 
-        st["step"] = 9; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 12; st["data"] = data; users[uid] = st; save_db(db)
         return (
-            "📊 *Resultados Iniciais*\n"
+            f"📊 *Resultados Iniciais — {nome} ({idade} anos)*\n"
             f"TMB: {data['tmb']} kcal\n"
             f"TDEE (atividade): {data['tdee']} kcal\n"
             f"Calorias meta ({objetivo}): {data['calorias']} kcal/dia\n"
-            f"Macros: P {prot_g} g | C {carb_g} g | G {gord_g} g\n\n"
+            f"Macros: Proteína {prot_g} g | Carboidratos {carb_g} g | Gorduras {gord_g} g\n\n"
             "**Q9. Quantas refeições por dia você prefere?**\n"
             "1️⃣ 3\n2️⃣ 4\n3️⃣ 5\n4️⃣ 6+\n_Responda 1–4._"
         )
 
-    # Q9 — Nº de refeições → Plano Alimentar + Cardápio exemplo + Hidratação + Treino ABC
-    if step == 9:
+    # Q9 — Nº de refeições → Plano + Cardápio + Hidratação + Treino
+    if step == 12:
         if text not in {"1","2","3","4"}:
             return "❗ Refeições: responda **1–4**."
         meals = {"1":3, "2":4, "3":5, "4":6}[text]
@@ -437,29 +599,18 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         p_split = _split_by_meals(int(data["prot_g"]), meals)
         c_split = _split_by_meals(int(data["carb_g"]), meals)
         g_split = _split_by_meals(int(data["gord_g"]), meals)
+        data.update({"split_kcal": kcal_split, "split_p": p_split, "split_c": c_split, "split_g": g_split})
 
-        data.update({
-            "split_kcal": kcal_split, "split_p": p_split,
-            "split_c": c_split, "split_g": g_split
-        })
-
-        # Hidratação 35–40 ml/kg (usar 37 ml/kg)
+        # Hidratação (37 ml/kg)
         peso = float(data.get("peso_kg_est", 75.0))
-        agua_ml = int(round(peso * 37))  # ml/kg
+        agua_ml = int(round(peso * 37))
         agua_l = max(2, round(agua_ml/1000, 1))
-        # Divisão sugerida
         agua_manha = round(agua_l * 0.33, 1)
         agua_tarde = round(agua_l * 0.37, 1)
         agua_noite = round(agua_l * 0.30, 1)
+        data.update({"agua_l": agua_l, "agua_split": {"manhã": agua_manha, "tarde": agua_tarde, "noite": agua_noite}})
 
-        data.update({
-            "agua_l": agua_l,
-            "agua_split": {"manhã": agua_manha, "tarde": agua_tarde, "noite": agua_noite}
-        })
-
-        # Treino ABC (base)
-        treino_freq = 3  # padrão do roteiro
-        treino_div = "ABC"
+        # Treino ABC (fixo neste roteiro)
         treino_txt = (
             "🏋️ *Treino (ABC sugerido)*\n"
             "A: Peito, Ombro, Tríceps\n"
@@ -468,21 +619,21 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
             "Frequência: 3x/sem (ABC) ou 6x/sem (ABC duas vezes)\n"
         )
 
-        # Monta texto do split por refeição
+        # Split por refeição (labels completos)
         linhas_split = []
         for i in range(1, meals+1):
             k = f"Ref {i}"
             linhas_split.append(
-                f"- {k}: {kcal_split[k]} kcal | P {p_split[k]} g | C {c_split[k]} g | G {g_split[k]} g"
+                f"- {k}: {kcal_split[k]} kcal | Proteína {p_split[k]} g | Carboidratos {c_split[k]} g | Gorduras {g_split[k]} g"
             )
         split_txt = "\n".join(linhas_split)
 
         cardapio_txt = _render_cardapio()
         agua_txt = f"💧 *Hidratação*: ~{agua_l} L/dia (manhã {agua_manha} L, tarde {agua_tarde} L, noite {agua_noite} L)."
+        nome = data.get("nome",""); idade = int(data.get("idade_exata", data.get("idade_estimada", 30)))
 
         st["step"] = 999
         st["data"] = data
-        # inicializa agendamentos
         schedule.setdefault("last", {})
         schedule["enabled"] = True
         st["schedule"] = schedule
@@ -490,17 +641,17 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
         save_db(db)
 
         return (
-            "🔥 *Plano Inicial*\n\n"
+            f"🔥 *Plano Inicial — {nome} ({idade} anos)*\n\n"
             f"Calorias: {data['calorias']} kcal/dia\n"
-            f"Macros: P {data['prot_g']} g | C {data['carb_g']} g | G {data['gord_g']} g\n\n"
+            f"Macros: Proteína {data['prot_g']} g | Carboidratos {data['carb_g']} g | Gorduras {data['gord_g']} g\n\n"
             "📅 *Divisão por refeição*\n"
             f"{split_txt}\n\n"
             "🍽️ *Cardápio exemplo*\n"
             f"{cardapio_txt}\n\n"
             f"{agua_txt}\n\n"
             f"{treino_txt}\n"
-            "ℹ️ Receberá lembretes diários (água/refeições) e 1 *check-in semanal*. "
-            "Para desligar lembretes: envie *PAUSAR*. Para reativar: *ATIVAR*."
+            "ℹ️ Você receberá lembretes diários (água/refeições) e 1 *check-in semanal*. "
+            "Para desligar: *PAUSAR*. Para reativar: *ATIVAR*."
         )
 
     # Pós-conclusão / comandos de agendamento
@@ -524,11 +675,70 @@ def build_reply(body: str, sender: str, waid: Optional[str]) -> str:
     return "❓ Não entendi. Digite **oi** para iniciar ou **reiniciar** para recomeçar."
 
 # ===================== CRON: mensagens diárias + check-in semanal =====================
-DAILY_SLOTS = [("manhã", 7), ("tarde", 12), ("pretreino", 17), ("noite", 21)]
-WEEKDAY_CHECKIN = 0  # 0=segunda
+
+WEEKDAY_CHECKIN = 0  # 0=segunda-feira
+
+def _distribute_meal_hours(A: int, B: int, count: int) -> List[int]:
+    A = _clamp_hour(A); B = _clamp_hour(B); count = max(1, int(count))
+    if A > B:  # janela inválida para refeições
+        return []
+    if count == 1: return [A]
+    hours = []
+    span = B - A
+    for i in range(count):
+        h = int(round(A + (span * (i/(count-1)))))
+        hours.append(_clamp_hour(h))
+    # dedup mantendo ordem
+    seen=set(); out=[]
+    for h in hours:
+        if h not in seen:
+            out.append(h); seen.add(h)
+    return sorted(out)
+
+def _force_post_workout(meals: List[int], A: int, B: int, T: Optional[int]) -> List[int]:
+    if T is None: return sorted(meals)
+    if not _in_window(T, A, B): return sorted(meals)
+    target = min(B, T+1)
+    if target in meals: return sorted(meals)
+    # mover a refeição mais próxima para target
+    if not meals: return [target]
+    idx = min(range(len(meals)), key=lambda i: abs(meals[i]-target))
+    meals[idx] = target
+    return sorted(list(set(meals)))
+
+def _water_slots(meals: List[int], A: int, B: int, avoid: set, need: int = 3) -> List[int]:
+    """Escolhe até 3 horas cheias entre as refeições; evita colisões com 'avoid'; respeita janela."""
+    cand: List[int] = []
+    m = sorted(meals)
+    if len(m) >= 2:
+        for i in range(len(m)-1):
+            mid = int(round((m[i]+m[i+1])/2))
+            if _in_window(mid, A, B): cand.append(mid)
+    # se faltar, preenche por terços da janela
+    while len(cand) < need and A <= B:
+        slots = [int(round(A + (B-A)*p)) for p in [1/4, 2/4, 3/4]]
+        for s in slots:
+            if len(cand) >= need: break
+            if _in_window(s, A, B): cand.append(s)
+        break
+    # filtra colisões/mute posteriormente no cron
+    # dedup e corta tamanho
+    seen=set(); out=[]
+    for h in cand:
+        if h not in seen and h not in avoid:
+            out.append(h); seen.add(h)
+    return sorted(out)[:need]
+
+def _should_send(last: Dict[str,str], key: str, now: datetime, h: int) -> bool:
+    """Marca e libera 1x por dia/hora (idempotência)."""
+    today_key = now.strftime("%Y-%m-%d") + f"@{h}"
+    if last.get(key) == today_key:
+        return False
+    last[key] = today_key
+    return True
 
 def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]:
-    """Retorna lista de (to, body) a enviar agora."""
+    """Retorna lista de (to, body) a enviar agora, calculado por PERFIL."""
     to_num = u.get("last_from") or ""  # salvo no /bot
     if not to_num:
         return []
@@ -536,33 +746,73 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
     if not sched.get("enabled", True):
         return []
     last = sched.get("last", {})
-    now = _now_br()
-    out: List[Tuple[str, str]] = []
+    data = (u.get("data") or {})
 
-    # Mensagens diárias
+    now = _now_br()
     hour = now.hour
     weekday = now.weekday()
 
-    def _should(key: str, h: int) -> bool:
-        # envia 1x por período; guarda carimbo do dia/hora
-        mark = last.get(key)
-        today_key = now.strftime("%Y-%m-%d") + f"@{h}"
-        if mark == today_key: return False
-        if abs(hour - h) <= 0:  # janela exata; simplificado
-            last[key] = today_key
-            return True
-        return False
+    # Perfil
+    fw = data.get("feeding_window", [8,20])
+    A, B = int(fw[0]), int(fw[1])
+    meal_count = int(data.get("meal_count", 4))
+    T = data.get("training_hour", None)
+    if isinstance(T, str) and T.isdigit(): T = int(T)
+    if isinstance(T, float): T = int(T)
+    if T is not None: T = _clamp_hour(T)
 
-    if _should("manha", 7):
-        out.append((to_num, "💧 Lembrete: 1º litro de água + café da manhã. Foco no plano."))
-    if _should("tarde", 12):
-        out.append((to_num, "🍽️ Almoço + água (~1,2 L no período). Evite pular refeição."))
-    if _should("pretreino", 17):
-        out.append((to_num, "⚡ Pré-treino: aquece, técnica limpa. Hoje é dia de vencer a inércia."))
-    if _should("noite", 21):
-        out.append((to_num, "🌙 Fechamento: anotações rápidas (fome/energia). 🔥 Missão do dia concluída!"))
+    mute = data.get("mute_hours", [22,5])
+    mute_tuple: Optional[Tuple[int,int]]
+    if mute in (None, []):
+        mute_tuple = None
+    else:
+        mute_tuple = (_clamp_hour(mute[0]), _clamp_hour(mute[1]))
 
-    # Check-in semanal (segunda de manhã)
+    def not_muted(h: int) -> bool:
+        if mute_tuple is None: return True
+        return not _in_mute(h, mute_tuple[0], mute_tuple[1])
+
+    out: List[Tuple[str, str]] = []
+    avoid = set()
+
+    # Refeições (por janela/Q9), garantindo 1 pós-treino se T∈[A,B]
+    meals = _distribute_meal_hours(A, B, meal_count)
+    meals = _force_post_workout(meals, A, B, T)
+    meals = sorted(h for h in meals if not_muted(h))
+
+    # Água (3 pings entre refeições)
+    water = _water_slots(meals, A, B, avoid=set(meals), need=3)
+    water = [h for h in water if not_muted(h)]
+
+    # Treino (T−1/T+1), independentemente da janela de alimentação, mas respeita mute
+    pre = post = None
+    if T is not None:
+        pre = _clamp_hour(T-1)
+        post = _clamp_hour(T+1)
+    train_slots = []
+    if pre is not None and not_muted(pre): train_slots.append(("pretreino", pre))
+    if post is not None and not_muted(post): train_slots.append(("pos_treino", post))
+
+    # Envio: só na hora exata (cron 1x/h)
+    # Refeições
+    for i, h in enumerate(meals, start=1):
+        if h == hour and _should_send(last, f"meal_{h}", now, h):
+            out.append((to_num, f"🍽️ *Refeição {i}* agora ({h:02d}:00). Mantenha as porções do plano."))
+
+    # Água
+    for j, h in enumerate(water, start=1):
+        if h == hour and _should_send(last, f"agua_{h}", now, h):
+            out.append((to_num, "💧 Lembrete de água. Pequenos goles agora. Meta diária em andamento."))
+
+    # Treino
+    for tag, h in train_slots:
+        if h == hour and _should_send(last, f"{tag}_{h}", now, h):
+            if tag == "pretreino":
+                out.append((to_num, "⚡ Pré-treino (T−1h): aquece, técnica limpa, foco total."))
+            else:
+                out.append((to_num, "✅ Pós-treino (T+1h): proteína + carbo limpo. Marca no app como feito."))
+
+    # Check-in semanal (segunda >= 08h)
     ck_key = "checkin"
     ck_mark = last.get(ck_key)
     if weekday == WEEKDAY_CHECKIN and hour >= 8:
@@ -576,11 +826,10 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
             ))
 
     # persistir last
-    u["schedule"]["last"] = last
+    u.setdefault("schedule", {})["last"] = last
     return out
 
 def _remember_last_from(users: Dict[str, Any], uid: str, sender: str):
-    # salva último destino 'From' para mensagens proativas
     users[uid]["last_from"] = sender
 
 # ===================== Flask app / rotas =====================
@@ -629,7 +878,20 @@ def create_app() -> Flask:
         body: str = (request.values.get("Body") or "").strip()
         sender: str = request.values.get("From", "")
         waid: Optional[str] = request.values.get("WaId")
-        log.info(f"POST /bot <- From={sender} WaId={waid} Body='{body}'")
+
+        # Coleta mídias (Twilio: NumMedia, MediaUrl0..)
+        try:
+            num_media = int(request.values.get("NumMedia", "0"))
+        except Exception:
+            num_media = 0
+        media_urls: List[str] = []
+        if num_media > 0:
+            for i in range(min(num_media, 3)):
+                url = request.values.get(f"MediaUrl{i}")
+                if url:
+                    media_urls.append(url)
+
+        log.info(f"POST /bot <- From={sender} WaId={waid} Body='{body}' Media={len(media_urls)}")
 
         # lembrar destino para cron
         try:
@@ -643,7 +905,7 @@ def create_app() -> Flask:
             pass
 
         try:
-            reply_text = _safe_reply(build_reply(body=body, sender=sender, waid=waid))
+            reply_text = _safe_reply(build_reply(body=body, sender=sender, waid=waid, media_urls=media_urls))
         except Exception as e:
             app.logger.exception(f"Erro no build_reply: {e}")
             reply_text = "⚠️ Tive um erro aqui. Mande **reiniciar** ou **oi** para seguir."
