@@ -1,7 +1,7 @@
 ﻿# server.py — Mete o Shape (WhatsApp) + health-check
 # Fluxo: Boas-vindas → Q0 Nome → Anamnese → Resultados Iniciais → Plano Alimentar (cardápio exemplo)
 #        → Hidratação → Treino ABC → Mensagens diárias automáticas → Check-in semanal
-import os, json, logging, threading, math
+import os, json, logging, threading, math, time
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
 from flask import Flask, request, Response
@@ -27,6 +27,9 @@ APP_NAME = os.getenv("PROJECT_NAME", "mete_o_shape")
 # >>> Ajuste de fuso horário dos lembretes <<<
 # Use TZ=America/Bahia no ambiente
 TZ = os.getenv("TZ", "America/Bahia")
+# Agendador interno (minutário). Coloque ENABLE_INTERNAL_CRON=0 para desligar.
+ENABLE_INTERNAL_CRON = os.getenv("ENABLE_INTERNAL_CRON", "1")
+_SCHED_STARTED = False
 
 # ===================== Storage (com fallback local) =====================
 DB_PATH = os.getenv("DB_PATH", "db.json")
@@ -721,7 +724,6 @@ def _water_slots(meals: List[int], A: int, B: int, avoid: set, need: int = 3) ->
             if len(cand) >= need: break
             if _in_window(s, A, B): cand.append(s)
         break
-    # filtra colisões/mute posteriormente no cron
     # dedup e corta tamanho
     seen=set(); out=[]
     for h in cand:
@@ -773,7 +775,6 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
         return not _in_mute(h, mute_tuple[0], mute_tuple[1])
 
     out: List[Tuple[str, str]] = []
-    avoid = set()
 
     # Refeições (por janela/Q9), garantindo 1 pós-treino se T∈[A,B]
     meals = _distribute_meal_hours(A, B, meal_count)
@@ -832,6 +833,48 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
 def _remember_last_from(users: Dict[str, Any], uid: str, sender: str):
     users[uid]["last_from"] = sender
 
+# ===================== Cron helpers reutilizáveis =====================
+def _run_cron_now(log) -> int:
+    """Executa a mesma lógica do /admin/cron e retorna quantas mensagens foram enviadas."""
+    db = load_db()
+    users = db.get("users", {})
+    total_msgs = 0
+    for uid, u in users.items():
+        try:
+            payloads = _cron_payload_for(uid, u, log)
+            for to, body in payloads:
+                _send_whatsapp(to, body, log)
+                total_msgs += 1
+        except Exception as e:
+            log.error(f"[internal-cron] error uid={uid}: {e}")
+    save_db(db)
+    return total_msgs
+
+def _start_internal_scheduler(log):
+    """Tenta iniciar APScheduler (minutário). Se indisponível, usa loop em thread."""
+    global _SCHED_STARTED
+    if _SCHED_STARTED or ENABLE_INTERNAL_CRON != "1":
+        return
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
+        scheduler = BackgroundScheduler(timezone=TZ)
+        scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*")
+        scheduler.start()
+        log.info("[scheduler] APScheduler iniciado (a cada 1 min)")
+    except Exception as e:
+        log.warning(f"[scheduler] APScheduler indisponível ({e}); usando loop em thread")
+        def _loop():
+            while True:
+                try:
+                    _run_cron_now(log)
+                except Exception as ex:
+                    log.error(f"[scheduler] loop error: {ex}")
+                time.sleep(60)
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+        log.info("[scheduler] Thread de agendamento iniciada (60s)")
+    _SCHED_STARTED = True
+
 # ===================== Flask app / rotas =====================
 def create_app() -> Flask:
     app = Flask(__name__)
@@ -839,6 +882,9 @@ def create_app() -> Flask:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger(APP_NAME)
+
+    # Inicia o agendador interno (sem depender de cron externo)
+    _start_internal_scheduler(log)
 
     @app.route("/", methods=["GET"])
     def root():
@@ -854,20 +900,9 @@ def create_app() -> Flask:
 
     @app.route("/admin/cron", methods=["GET"])
     def admin_cron():
-        """Chame esta rota 1x/h pela sua automação (Railway/cron) para disparar lembretes/check-ins."""
-        db = load_db()
-        users = db.get("users", {})
-        total_msgs = 0
-        for uid, u in users.items():
-            try:
-                payloads = _cron_payload_for(uid, u, log)
-                for to, body in payloads:
-                    _send_whatsapp(to, body, log)
-                    total_msgs += 1
-            except Exception as e:
-                log.error(f"/admin/cron error uid={uid}: {e}")
-        save_db(db)
-        return Response(f"cron ok – sent={total_msgs}", 200, mimetype="text/plain")
+        """Executa manualmente o job (útil para teste ou cron externo)."""
+        total_msgs = _run_cron_now(log)
+        return Response(f"cron ok - sent={total_msgs}", 200, mimetype="text/plain")
 
     @app.route("/bot", methods=["GET", "POST"])
     def bot():
