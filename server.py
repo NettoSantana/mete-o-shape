@@ -858,7 +858,7 @@ def _start_internal_scheduler(log):
     try:
         from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
         scheduler = BackgroundScheduler(timezone=TZ)
-        scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*")
+        scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*/3")
         scheduler.start()
         log.info("[scheduler] APScheduler iniciado (a cada 1 min)")
     except Exception as e:
