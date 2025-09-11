@@ -276,6 +276,7 @@ OBJ_CAL_ADJ = {
 }
 
 # ============== Envio opcional de mensagens proativas (cron) ==============
+
 def _twilio_client():
     if TwilioClient and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM:
         try:
@@ -288,6 +289,10 @@ def _send_whatsapp(to_num: str, body: str, log) -> bool:
     """Envia com split automático em múltiplas mensagens se necessário."""
     cli = _twilio_client()
     chunks = _split_for_whatsapp(body, WHATSAPP_CHAR_LIMIT)
+
+    # garante prefixo 'whatsapp:' no destino
+    if to_num and not to_num.startswith("whatsapp:"):
+        to_num = f"whatsapp:{to_num}"
 
     if not cli:
         for idx, ch in enumerate(chunks, 1):
@@ -305,6 +310,7 @@ def _send_whatsapp(to_num: str, body: str, log) -> bool:
     return ok
 
 # ===================== Cálculos de Nutrição =====================
+
 def _calc_tmb_mifflin(sexo: str, peso_kg: float, altura_cm: float, idade: int) -> float:
     base = 10 * peso_kg + 6.25 * altura_cm - 5 * idade
     return base + (5 if (sexo or "").lower().startswith("m") else -161)
@@ -393,6 +399,21 @@ def _render_cardapio() -> str:
     return "\n".join(linhas)
 
 # ===================== Core do fluxo =====================
+# --- MODO TESTE 3m (ativável por senha via WhatsApp) ---
+TEST_SECRET = "#ativar3m"
+TEST_SECRET_OFF = "#desativar3m"
+TEST_SECRET_STATUS = "#status3m"
+TEST_MODE: bool = False
+TEST_INTERVAL_MIN: int = 3
+TEST_TARGETS: set[str] = set()
+TEST_LAST_TS: float = 0.0
+
+def _normalize_e164(s: Optional[str]) -> str:
+    s = (s or "").strip()
+    if s.startswith("whatsapp:"):
+        s = s.split(":", 1)[1]
+    return s
+
 def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optional[List[str]] = None) -> str:
     """
     Fluxo — Boas-vindas → Q0 Nome → Anamnese (Q1–Q7) + fotos → Q8a–Q8c → Resultados Iniciais → Plano → ...
@@ -409,6 +430,27 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
     step = int(st.get("step", 0))
     data = st.get("data", {})
     schedule = st.get("schedule", {"last": {}})
+
+    # === COMANDOS DE TESTE (sempre ativos) ===
+    global TEST_MODE, TEST_TARGETS
+    norm_from = _normalize_e164(sender)
+    if text == TEST_SECRET:
+        TEST_MODE = True
+        if norm_from:
+            TEST_TARGETS.add(norm_from)
+        return (
+            "🔔 *Modo TESTE 3 min ATIVADO*\n"
+            f"Alvos: {', '.join(sorted(TEST_TARGETS)) or '—'}\n"
+            "Use *#desativar3m* para desligar e *#status3m* para ver o status."
+        )
+    if text == TEST_SECRET_OFF:
+        TEST_MODE = False
+        TEST_TARGETS.clear()
+        return "🛑 Modo TESTE desativado."
+    if text == TEST_SECRET_STATUS:
+        onoff = "ON" if TEST_MODE else "OFF"
+        alvos = ", ".join(sorted(TEST_TARGETS)) or "—"
+        return f"ℹ️ TESTE: {onoff} | alvos: {alvos} | intervalo: {TEST_INTERVAL_MIN} min"
 
     # ---- Comandos utilitários
     if text in {"ping", "status", "up"}:
@@ -819,6 +861,29 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
 
 WEEKDAY_CHECKIN = 0  # 0=segunda-feira
 
+# --- Executor do modo TESTE ---
+def _run_cron_test_now(log) -> int:
+    global TEST_LAST_TS
+    now = _now_br()
+    # respeita intervalo de 3 min (ou valor configurado)
+    if TEST_LAST_TS:
+        delta_min = (now.timestamp() - TEST_LAST_TS) / 60.0
+        if delta_min < max(1, TEST_INTERVAL_MIN):
+            log.info(f"[test-cron] skip ({delta_min:.1f} < {TEST_INTERVAL_MIN} min)")
+            return 0
+    if not TEST_TARGETS:
+        log.info("[test-cron] sem alvos")
+        return 0
+    body = f"🔔 [TESTE] {now.strftime('%d/%m %H:%M:%S')} — lembrete 3m ativo."
+    sent = 0
+    for raw in list(TEST_TARGETS):
+        if _send_whatsapp(raw, body, log):
+            sent += 1
+    TEST_LAST_TS = now.timestamp()
+    log.info(f"[test-cron] sent={sent}")
+    return sent
+
+# --- utilitários do cron PROD ---
 def _distribute_meal_hours(A: int, B: int, count: int) -> List[int]:
     A = _clamp_hour(A); B = _clamp_hour(B); count = max(1, int(count))
     if A > B:  # janela inválida para refeições
@@ -955,10 +1020,12 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
     u.setdefault("schedule", {})["last"] = last
     return out
 
+
 def _remember_last_from(users: Dict[str, Any], uid: str, sender: str):
     users[uid]["last_from"] = sender
 
 # ===================== Cron helpers reutilizáveis =====================
+
 def _run_cron_now(log) -> int:
     """Executa a mesma lógica do /admin/cron e retorna quantas mensagens foram enviadas."""
     db = load_db()
@@ -975,23 +1042,35 @@ def _run_cron_now(log) -> int:
     save_db(db)
     return total_msgs
 
+
 def _start_internal_scheduler(log):
-    """Tenta iniciar APScheduler (minutário). Se indisponível, usa loop em thread."""
+    """Agendador: checa TEST_MODE a cada minuto e dispara o executor correto."""
     global _SCHED_STARTED
     if _SCHED_STARTED or ENABLE_INTERNAL_CRON != "1":
         return
     try:
         from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
         scheduler = BackgroundScheduler(timezone=TZ)
-        scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*/3")
+        def _tick():
+            try:
+                if TEST_MODE:
+                    _run_cron_test_now(log)
+                else:
+                    _run_cron_now(log)
+            except Exception as ex:
+                log.error(f"[scheduler] tick error: {ex}")
+        scheduler.add_job(_tick, "cron", minute="*")  # roda a cada 1 minuto
         scheduler.start()
-        log.info("[scheduler] APScheduler iniciado (a cada 3 min)")
+        log.info("[scheduler] iniciado (tick 1 min; TEST/PROD decidido em runtime)")
     except Exception as e:
         log.warning(f"[scheduler] APScheduler indisponível ({e}); usando loop em thread")
         def _loop():
             while True:
                 try:
-                    _run_cron_now(log)
+                    if TEST_MODE:
+                        _run_cron_test_now(log)
+                    else:
+                        _run_cron_now(log)
                 except Exception as ex:
                     log.error(f"[scheduler] loop error: {ex}")
                 time.sleep(60)
@@ -1001,6 +1080,7 @@ def _start_internal_scheduler(log):
     _SCHED_STARTED = True
 
 # ===================== Flask app / rotas =====================
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.url_map.strict_slashes = False
@@ -1024,7 +1104,8 @@ def create_app() -> Flask:
 
     @app.route("/admin/cron", methods=["GET"])
     def admin_cron():
-        total_msgs = _run_cron_now(log)
+        use_test = TEST_MODE or (request.args.get("test") == "1")
+        total_msgs = _run_cron_test_now(log) if use_test else _run_cron_now(log)
         return Response(f"cron ok - sent={total_msgs}", 200, mimetype="text/plain")
 
     @app.route("/bot", methods=["GET", "POST"])
