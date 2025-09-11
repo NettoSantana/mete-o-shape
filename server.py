@@ -521,7 +521,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 2; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q1. Sexo**\n"
-            "1️⃣ Masculino\n2️⃣ Feminino\n_Responda 1–2._"
+            "a) Masculino\nb) Feminino\n_Responda a–b._"
         )
 
     # ===================== ANAMNESE =====================
@@ -530,10 +530,10 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         if text not in {"1","2"}:
             return "❗ Responda **1** (Masculino) ou **2** (Feminino)."
         data["sexo"] = "Masculino" if text == "1" else "Feminino"
-        st["step"] = 3; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 4; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q2. Idade (faixa)**\n"
-            "1️⃣ 16–24\n2️⃣ 25–34\n3️⃣ 35–44\n4️⃣ 45–54\n5️⃣ 55–64\n6️⃣ 65+\n_Responda 1–6._"
+            "a) 16–24\nb) 25–34\nc) 35–44\nd) 45–54\ne) 55–64\nf) 65+\n_Responda a–f._"
         )
 
     # Q2 (faixa) → Q2b (exata) → Q3 (altura)
@@ -558,7 +558,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 5; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q3. Altura (faixa)**\n"
-            "1️⃣ <1,60 m\n2️⃣ 1,60–1,69 m\n3️⃣ 1,70–1,79 m\n4️⃣ 1,80–1,89 m\n5️⃣ ≥1,90 m\n_Responda 1–5._"
+            "a) <1,60 m\nb) 1,60–1,69 m\nc) 1,70–1,79 m\nd) 1,80–1,89 m\ne) ≥1,90 m\n_Responda a–e._"
         )
 
     # Q3 Altura → Q4 Peso
@@ -571,7 +571,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 6; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q4. Peso atual (faixa, kg)**\n"
-            "1️⃣ <60\n2️⃣ 60–69\n3️⃣ 70–79\n4️⃣ 80–89\n5️⃣ 90–99\n6️⃣ 100+\n_Responda 1–6._"
+            "a) <60\nb) 60–69\nc) 70–79\nd) 80–89\ne) 90–99\nf) 100+\n_Responda a–f._"
         )
 
     # Q4 Peso → Q5 Atividade
@@ -584,7 +584,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 7; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q5. Nível de atividade física**\n"
-            "1️⃣ Sedentário (0–1x/sem)\n2️⃣ Leve (2–3x/sem)\n3️⃣ Moderado (3–4x/sem)\n4️⃣ Intenso (5–6x/sem)\n_Responda 1–4._"
+            "a) Sedentário (0–1x/sem)\nb) Leve (2–3x/sem)\nc) Moderado (3–4x/sem)\nd) Intenso (5–6x/sem)\n_Responda a–d._"
         )
 
     # Q5 Atividade → Q6 Objetivo
@@ -596,7 +596,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 8; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q6. Objetivo principal**\n"
-            "1️⃣ Emagrecimento\n2️⃣ Definição/Manutenção\n3️⃣ Ganho de massa\n_Responda 1–3._"
+            "a) Emagrecimento\nb) Definição/Manutenção\nc) Ganho de massa\n_Responda a–c._"
         )
 
     # Q6 Objetivo → Q7 Restrições
@@ -608,7 +608,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 9; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q7. Restrições/observações**\n"
-            "1️⃣ Sem restrições\n2️⃣ Intolerância à lactose\n3️⃣ Vegetariano\n4️⃣ Low-carb\n5️⃣ Outras\n_Responda 1–5._"
+            "a) Sem restrições\nb) Intolerância à lactose\nc) Vegetariano\nd) Low-carb\ne) Outras\n_Responda a–e._"
         )
 
     # Q7 → Observação livre (71) ou segue
@@ -626,10 +626,10 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         if text == "5":
             st["step"] = 91; st["data"] = data; users[uid] = st; save_db(db)
             return "✍️ Digite sua observação em uma frase curta (ex.: alergia a ovos)."
-        st["step"] = 10; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 100; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
-            "1️⃣ Sim, vou enviar\n2️⃣ Pular por enquanto"
+            "a) Sim, vou enviar\nb) Pular por enquanto"
         )
 
     if step == 91:
@@ -637,10 +637,10 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         if not obs:
             return "❗ Escreva uma observação curta (texto)."
         data["restricoes_obs"] = obs
-        st["step"] = 10; st["data"] = data; users[uid] = st; save_db(db)
+        st["step"] = 100; st["data"] = data; users[uid] = st; save_db(db)
         return (
             "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
-            "1️⃣ Sim, vou enviar\n2️⃣ Pular por enquanto"
+            "a) Sim, vou enviar\nb) Pular por enquanto"
         )
 
     # Q7c Fotos → se Sim, entra no step 92 aguardando mídias
@@ -654,8 +654,8 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["step"] = 100; users[uid] = st; save_db(db)
         return (
             "**Q8a. Horário do TREINO**\n"
-            "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
-            "_Responda 1–8._"
+            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+            "_Responda a–h._"
         )
 
     # Step 92: recebendo fotos
@@ -670,8 +670,8 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             return (
                 "✅ Fotos recebidas.\n\n"
                 "**Q8a. Horário do TREINO**\n"
-                "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
-                "_Responda 1–8._"
+                "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+                "_Responda a–h._"
             )
         else:
             return "❗ Não recebi imagem. Envie a(s) foto(s) agora ou digite **pular** para seguir."
@@ -681,8 +681,8 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         return (
             "➡️ Pulando fotos.\n\n"
             "**Q8a. Horário do TREINO**\n"
-            "1️⃣ 6h  2️⃣ 12h  3️⃣ 17h  4️⃣ 18h  5️⃣ 19h  6️⃣ 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
-            "_Responda 1–8._"
+            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+            "_Responda a–h._"
         )
 
     # ===================== Q8a/Q8b/Q8c (perfil de alertas) =====================
@@ -704,8 +704,8 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["data"] = data; st["step"] = 101; users[uid] = st; save_db(db)
         return (
             "**Q8b. Janela de ALIMENTAÇÃO (HH–HH)**\n"
-            "1️⃣ 08–20  2️⃣ 07–21  3️⃣ 06–22  4️⃣ 10–18  5️⃣ Outra (digite HH–HH)\n"
-            "_Responda 1–5._"
+            "a) 08–20  b) 07–21  c) 06–22  d) 10–18  e) Outra (digite HH–HH)\n"
+            "_Responda a–e._"
         )
 
     if step == 101:
@@ -720,8 +720,8 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         st["data"] = data; st["step"] = 102; users[uid] = st; save_db(db)
         return (
             "**Q8c. Silêncio/Não perturbe (HH–HH)**\n"
-            "1️⃣ 22–05  2️⃣ 23–06  3️⃣ 00–06  4️⃣ Não silenciar  5️⃣ Outra (HH–HH)\n"
-            "_Responda 1–5._"
+            "a) 22–05  b) 23–06  c) 00–06  d) Não silenciar  e) Outra (HH–HH)\n"
+            "_Responda a–e._"
         )
 
     if step == 102:
@@ -747,7 +747,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             f"Treino: {('sem treino' if data.get('training_hour') is None else str(data.get('training_hour'))+'h')}\n"
             f"Janela: {tuple(data.get('feeding_window',[8,20]))}\n"
             f"Silêncio: {('nenhum' if data.get('mute_hours') in (None,[]) else tuple(data.get('mute_hours')))}\n\n"
-            "**Confirmar?**\n1️⃣ Confirmar\n2️⃣ Reiniciar"
+            "**Confirmar?**\na) Confirmar\nb) Reiniciar"
         )
 
     # Confirmação → Resultados Iniciais
@@ -787,7 +787,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             f"Calorias meta ({objetivo}): {data['calorias']} kcal/dia\n"
             f"Macros: Proteína {prot_g} g | Carboidratos {carb_g} g | Gorduras {gord_g} g\n\n"
             "**Q9. Quantas refeições por dia você prefere?**\n"
-            "1️⃣ 3\n2️⃣ 4\n3️⃣ 5\n4️⃣ 6+\n_Responda 1–4._"
+            "a) 3\nb) 4\nc) 5\nd) 6+\n_Responda a–d._"
         )
 
     # Q9 — Nº de refeições → Plano + Cardápio + Hidratação + Treino
@@ -1203,5 +1203,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
+
 
 
