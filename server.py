@@ -428,6 +428,32 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
     users = db.setdefault("users", {})
     st = users.setdefault(uid, {"flow": "ms", "step": 0, "data": {}, "schedule": {"last": {}}})
     step = int(st.get("step", 0))
+    # --- NORMALIZADOR: permite resposta por letra (a->1, b->2, ...) ---
+    if text:
+        ch = text[0].lower()
+        if 'a' <= ch <= 'z':
+            try:
+                text = str(ord(ch) - 96)  # a=1, b=2, ...
+            except Exception:
+                pass
+
+    # --- BYPASS: remover idade por faixa (Q2) ---
+    if step == 3:
+        st["step"] = 4
+        users[uid] = st
+        save_db(db)
+        return "**Q2b. Qual sua idade EXATA (número)?**"
+
+    # --- DESABILITAR Q7c (fotos) ---
+    if step == 10:
+        st["step"] = 100
+        users[uid] = st
+        save_db(db)
+        return (
+            "**Q8a. Horário do TREINO**\n"
+            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  g) Não treino  h) Outro (0–23)\n"
+            "_Responda a–h._"
+        )
     data = st.get("data", {})
     schedule = st.get("schedule", {"last": {}})
 
@@ -1177,3 +1203,4 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
+
