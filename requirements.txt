@@ -4,3 +4,5 @@ Twilio==9.2.3
 pytz==2024.1
 waitress==2.1.2
 gunicorn==22.0.0
+openai>=1.40
+
