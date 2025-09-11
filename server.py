@@ -151,7 +151,7 @@ except Exception:  # pragma: no cover
     def save_db(db: Dict[str, Any]) -> None: _save_db_local(db)
 
 # ===================== Helpers / Constantes =====================
-START_WORDS = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite"}
+START_WORDS = {"oi", "ola", "olá", "bom dia", "boa tarde", "boa noite", "iniciar"}
 
 def _digits_only(s: Optional[str]) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
@@ -429,7 +429,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
     st = users.setdefault(uid, {"flow": "ms", "step": 0, "data": {}, "schedule": {"last": {}}})
     step = int(st.get("step", 0))
     # --- NORMALIZADOR: permite resposta por letra (a->1, b->2, ...) ---
-    if text:
+    if len(text) == 1:
         ch = text[0].lower()
         if 'a' <= ch <= 'z':
             try:
@@ -1203,4 +1203,5 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
+
 
