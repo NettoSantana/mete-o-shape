@@ -237,7 +237,7 @@ def _split_for_whatsapp(text: str, limit: int = WHATSAPP_CHAR_LIMIT) -> List[str
         parts.append(rest)
     return parts
 
-# Mapas de faixas → valores estimados (para cálculos)
+# (Mantidos, ainda que não usados após retirar Q2 faixa)
 AGE_MAP = {
     "1": (16, 24, 21),
     "2": (25, 34, 29),
@@ -416,8 +416,8 @@ def _normalize_e164(s: Optional[str]) -> str:
 
 def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optional[List[str]] = None) -> str:
     """
-    Fluxo — Boas-vindas → Q0 Nome → Anamnese (Q1–Q7) + fotos → Q8a–Q8c → Resultados Iniciais → Plano → ...
-    + Q&A livre depois da conclusão ou sob demanda (mensagem com '?', 'ajuda', 'dúvida', 'pergunta').
+    Fluxo — Boas-vindas → Q0 Nome → Anamnese (Q1–Q7) → Q8a–Q8c → Resultados Iniciais → Plano → ...
+    + Q&A livre depois de concluir ou sob demanda.
     Estado: users[uid] = { flow:'ms', step:int, data:{...}, schedule:{...} }
     Comandos: oi | reiniciar | status | ping
     """
@@ -428,6 +428,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
     users = db.setdefault("users", {})
     st = users.setdefault(uid, {"flow": "ms", "step": 0, "data": {}, "schedule": {"last": {}}})
     step = int(st.get("step", 0))
+
     # --- NORMALIZADOR: permite resposta por letra (a->1, b->2, ...) ---
     if len(text) == 1:
         ch = text[0].lower()
@@ -437,23 +438,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             except Exception:
                 pass
 
-    # --- BYPASS: remover idade por faixa (Q2) ---
-    if step == 3:
-        st["step"] = 4
-        users[uid] = st
-        save_db(db)
-        return "**Q2b. Qual sua idade EXATA (número)?**"
-
-    # --- DESABILITAR Q7c (fotos) ---
-    if step == 10:
-        st["step"] = 100
-        users[uid] = st
-        save_db(db)
-        return (
-            "**Q8a. Horário do TREINO**\n"
-            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  g) Não treino  h) Outro (0–23)\n"
-            "_Responda a–h._"
-        )
     data = st.get("data", {})
     schedule = st.get("schedule", {"last": {}})
 
@@ -525,27 +509,15 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         )
 
     # ===================== ANAMNESE =====================
-    # Q1 (Sexo) → Q2 (Faixa de idade)
+    # Q1 (Sexo) → **pede idade EXATA (sem faixa)**
     if step == 2:
         if text not in {"1","2"}:
             return "❗ Responda **1** (Masculino) ou **2** (Feminino)."
         data["sexo"] = "Masculino" if text == "1" else "Feminino"
-        st["step"] = 4; st["data"] = data; users[uid] = st; save_db(db)
-        return (
-            "**Q2. Idade (faixa)**\n"
-            "a) 16–24\nb) 25–34\nc) 35–44\nd) 45–54\ne) 55–64\nf) 65+\n_Responda a–f._"
-        )
-
-    # Q2 (faixa) → Q2b (exata) → Q3 (altura)
-    if step == 3:
-        if text not in AGE_MAP:
-            return "❗ Idade: responda **1–6**."
-        low, high, mid = AGE_MAP[text]
-        data["idade_faixa"] = f"{low}–{high}"
-        data["idade_estimada"] = mid
-        st["step"] = 4; st["data"] = data; users[uid] = st; save_db(db)
+        st["data"] = data; st["step"] = 4; users[uid] = st; save_db(db)
         return "**Q2b. Qual sua idade EXATA (número)?**"
 
+    # Q2b (idade exata) → Q3 (altura)
     if step == 4:
         try:
             idade_exata = int("".join(ch for ch in (body or "") if ch.isdigit()))
@@ -626,10 +598,12 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         if text == "5":
             st["step"] = 91; st["data"] = data; users[uid] = st; save_db(db)
             return "✍️ Digite sua observação em uma frase curta (ex.: alergia a ovos)."
+        # pula fotos e vai direto para Q8a
         st["step"] = 100; st["data"] = data; users[uid] = st; save_db(db)
         return (
-            "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
-            "a) Sim, vou enviar\nb) Pular por enquanto"
+            "**Q8a. Horário do TREINO**\n"
+            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  g) Não treino  h) Outro (0–23)\n"
+            "_Responda a–h._"
         )
 
     if step == 91:
@@ -637,51 +611,11 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         if not obs:
             return "❗ Escreva uma observação curta (texto)."
         data["restricoes_obs"] = obs
+        # pula fotos e vai direto para Q8a
         st["step"] = 100; st["data"] = data; users[uid] = st; save_db(db)
         return (
-            "**Q7c. Quer enviar fotos (frente/lado/costas) agora?**\n"
-            "a) Sim, vou enviar\nb) Pular por enquanto"
-        )
-
-    # Q7c Fotos → se Sim, entra no step 92 aguardando mídias
-    if step == 10:
-        if text not in {"1","2"}:
-            return "❗ Responda **1** (Sim) ou **2** (Pular)."
-        if text == "1":
-            st["step"] = 92; users[uid] = st; save_db(db)
-            return "📸 Envie de 1 a 3 fotos agora (frente / lado / costas)."
-        # pular → segue para Q8a (treino)
-        st["step"] = 100; users[uid] = st; save_db(db)
-        return (
             "**Q8a. Horário do TREINO**\n"
-            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
-            "_Responda a–h._"
-        )
-
-    # Step 92: recebendo fotos
-    if step == 92:
-        fotos = data.get("fotos", [])
-        media_urls = media_urls or []
-        if media_urls:
-            fotos.extend(media_urls[:3])
-            data["fotos"] = fotos
-            st["data"] = data
-            st["step"] = 100; users[uid] = st; save_db(db)
-            return (
-                "✅ Fotos recebidas.\n\n"
-                "**Q8a. Horário do TREINO**\n"
-                "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
-                "_Responda a–h._"
-            )
-        else:
-            return "❗ Não recebi imagem. Envie a(s) foto(s) agora ou digite **pular** para seguir."
-
-    if step == 92 and text == "pular":
-        st["step"] = 100; users[uid] = st; save_db(db)
-        return (
-            "➡️ Pulando fotos.\n\n"
-            "**Q8a. Horário do TREINO**\n"
-            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  7️⃣ Não treino  8️⃣ Outro (0–23)\n"
+            "a) 6h  b) 12h  c) 17h  d) 18h  e) 19h  f) 20h  g) Não treino  h) Outro (0–23)\n"
             "_Responda a–h._"
         )
 
@@ -1203,6 +1137,3 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[server] Waitress não disponível ({e}) — usando Flask dev em http://{host}:{port}")
         app.run(host=host, port=port, debug=False)
-
-
-
