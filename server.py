@@ -1,6 +1,6 @@
-﻿# server.py — Mete o Shape (WhatsApp) + health-check
+﻿# server.py — Mete o Shape (WhatsApp) + health-check + Q&A (OpenAI)
 # Fluxo: Boas-vindas → Q0 Nome → Anamnese → Resultados Iniciais → Plano Alimentar (cardápio exemplo)
-#        → Hidratação → Treino ABC → Mensagens diárias automáticas → Check-in semanal
+#        → Hidratação → Treino ABC → Mensagens diárias automáticas → Check-in semanal → Q&A livre
 import os, json, logging, threading, math, time
 from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
@@ -22,6 +22,90 @@ except Exception:  # pragma: no cover
         def message(self, text: str): self._m = _FakeMsg(text); return self._m
         def __str__(self): return getattr(self._m, "body", "")
     TwilioClient = None
+
+# ===== OpenAI (Q&A) =====
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL   = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+try:
+    from openai import OpenAI
+except Exception:
+    OpenAI = None  # pragma: no cover
+
+def _ai_client():
+    if OpenAI and OPENAI_API_KEY:
+        try:
+            return OpenAI(api_key=OPENAI_API_KEY)
+        except Exception:
+            return None
+    return None
+
+def _compose_profile_context(data: Dict[str, Any]) -> str:
+    nome  = data.get("nome", "")
+    sexo  = data.get("sexo", "")
+    idade = data.get("idade_exata", data.get("idade_estimada"))
+    objetivo = data.get("objetivo", "")
+    atividade = data.get("atividade", "")
+    calorias = data.get("calorias")
+    p = data.get("prot_g"); c = data.get("carb_g"); g = data.get("gord_g")
+    restr = data.get("restricoes"); robs = data.get("restricoes_obs")
+    treino_h = data.get("training_hour")
+    fw = data.get("feeding_window")
+    mute = data.get("mute_hours")
+    partes = []
+    if nome: partes.append(f"Nome: {nome}")
+    if sexo or idade: partes.append(f"Perfil: {sexo}, {idade} anos")
+    if objetivo or atividade: partes.append(f"Objetivo: {objetivo} | Atividade: {atividade}")
+    if calorias is not None and p and c and g:
+        partes.append(f"Meta diária: {calorias} kcal (P {p}g, C {c}g, G {g}g)")
+    if restr:
+        if robs: partes.append(f"Restrições: {restr} ({robs})")
+        else: partes.append(f"Restrições: {restr}")
+    if treino_h is not None: partes.append(f"Treino ~ {treino_h}h")
+    if fw: partes.append(f"Janela de alimentação: {fw}")
+    if mute not in (None, []): partes.append(f"Silêncio: {mute}")
+    return " | ".join(partes) if partes else "Sem perfil completo ainda."
+
+def _ai_answer(question: str, data: Dict[str, Any]) -> Optional[str]:
+    """Gera resposta de Q&A contextualizada. Retorna None se indisponível/erro."""
+    cli = _ai_client()
+    if not cli: 
+        return None
+    system = (
+        "Você é um coach de saúde e nutrição objetivo, didático e motivador. "
+        "Responda em português do Brasil, em tom direto e prático, com bullets curtos quando útil. "
+        "Use as informações do perfil do aluno se disponíveis, mas não invente dados."
+    )
+    context = _compose_profile_context(data)
+    user_msg = (
+        "Contexto do aluno:\n"
+        f"{context}\n\n"
+        "Pergunta do aluno:\n"
+        f"{(question or '').strip()}"
+    )
+    try:
+        resp = cli.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0.7,
+            max_tokens=500,
+            messages=[
+                {"role":"system","content":system},
+                {"role":"user","content":user_msg}
+            ],
+        )
+        out = (resp.choices[0].message.content or "").strip()
+        return out or None
+    except Exception:
+        return None
+
+def _maybe_route_to_ai(text: str, step: int) -> bool:
+    """Quando true, tratamos a mensagem como Q&A instead of fluxo."""
+    t = (text or "").strip().lower()
+    if step >= 999:
+        return True
+    if "?" in t: 
+        return True
+    gatilhos = ("duvida","dúvida","ajuda","pergunta")
+    return any(t.startswith(g) for g in gatilhos)
 
 APP_NAME = os.getenv("PROJECT_NAME", "mete_o_shape")
 # >>> Ajuste de fuso horário dos lembretes <<<
@@ -269,6 +353,7 @@ def _render_cardapio() -> str:
 def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optional[List[str]] = None) -> str:
     """
     Fluxo — Boas-vindas → Q0 Nome → Anamnese (Q1–Q7) + fotos → Q8a–Q8c → Resultados Iniciais → Plano → ...
+    + Q&A livre depois da conclusão ou sob demanda (mensagem com '?', 'ajuda', 'dúvida', 'pergunta').
     Estado: users[uid] = { flow:'ms', step:int, data:{...}, schedule:{...} }
     Comandos: oi | reiniciar | status | ping
     """
@@ -290,9 +375,20 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         users[uid] = st; save_db(db)
         return "🔁 Reiniciado. Digite **oi** para começar."
 
+    # ---- Q&A sob demanda antes de tudo (se o usuário perguntar algo e ainda não concluiu)
+    if 0 < step < 999 and _maybe_route_to_ai(text, step):
+        ai = _ai_answer(body, data)
+        if ai:
+            return ai + "\n\n_(Para continuar o cadastro, responda conforme a última pergunta.)_"
+
     # ---- Step 0 → Q0 (saudação + NOME)
     if step == 0:
         if text not in START_WORDS:
+            # Se o usuário chegar fazendo pergunta logo de cara:
+            if _maybe_route_to_ai(text, step):
+                ai = _ai_answer(body, data)
+                if ai:
+                    return ai + "\n\nPara começar o plano, digite **oi**."
             return "👋 Digite **oi** para iniciar."
         st["step"] = 1; st["data"] = {}; users[uid] = st; save_db(db)
         return (
@@ -654,10 +750,11 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             f"{agua_txt}\n\n"
             f"{treino_txt}\n"
             "ℹ️ Você receberá lembretes diários (água/refeições) e 1 *check-in semanal*. "
-            "Para desligar: *PAUSAR*. Para reativar: *ATIVAR*."
+            "Para desligar: *PAUSAR*. Para reativar: *ATIVAR*.\n\n"
+            "🧠 *Dica*: pode me perguntar qualquer coisa de treino/nutrição agora (ex.: \"posso trocar arroz por batata?\")."
         )
 
-    # Pós-conclusão / comandos de agendamento
+    # Pós-conclusão / comandos de agendamento + Q&A livre
     if step >= 999:
         if text == "pausar":
             st["schedule"]["enabled"] = False
@@ -667,14 +764,22 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             st["schedule"]["enabled"] = True
             users[uid] = st; save_db(db)
             return "▶️ Lembretes reativados. Você receberá mensagens ao longo do dia."
+
+        # Q&A como padrão pós-fluxo
+        ai = _ai_answer(body, data)
+        if ai:
+            return ai
         return (
             "✅ Fluxo concluído.\n"
             "• *reiniciar* para recomeçar\n"
             "• *pausar* ou *ativar* lembretes\n"
-            "• *status* para checar online"
+            "• Pode me perguntar dúvidas de treino/nutrição 👍"
         )
 
-    # Fallback
+    # Fallback — tenta Q&A antes de desistir
+    ai = _ai_answer(body, data)
+    if ai:
+        return ai + "\n\n_(Para continuar o cadastro, responda conforme a última pergunta.)_"
     return "❓ Não entendi. Digite **oi** para iniciar ou **reiniciar** para recomeçar."
 
 # ===================== CRON: mensagens diárias + check-in semanal =====================
@@ -858,9 +963,10 @@ def _start_internal_scheduler(log):
     try:
         from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
         scheduler = BackgroundScheduler(timezone=TZ)
+        # Para teste: a cada 3 minutos
         scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*/3")
         scheduler.start()
-        log.info("[scheduler] APScheduler iniciado (a cada 1 min)")
+        log.info("[scheduler] APScheduler iniciado (a cada 3 min)")
     except Exception as e:
         log.warning(f"[scheduler] APScheduler indisponível ({e}); usando loop em thread")
         def _loop():

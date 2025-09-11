@@ -1,0 +1,81 @@
+﻿*** a/server.py
+--- b/server.py
+@@
+-import os, json, logging, threading, math
++import os, json, logging, threading, math, time
+@@
+ TZ = os.getenv("TZ", "America/Bahia")
++ENABLE_INTERNAL_CRON = os.getenv("ENABLE_INTERNAL_CRON", "1")  # "1" liga agendador interno
++_SCHED_STARTED = False
+@@
+ def _remember_last_from(users: Dict[str, Any], uid: str, sender: str):
+     users[uid]["last_from"] = sender
+
++# ===================== Cron helpers reutilizáveis =====================
++def _run_cron_now(log) -> int:
++    """Executa a mesma lógica do /admin/cron e retorna quantas mensagens foram enviadas."""
++    db = load_db()
++    users = db.get("users", {})
++    total_msgs = 0
++    for uid, u in users.items():
++        try:
++            payloads = _cron_payload_for(uid, u, log)
++            for to, body in payloads:
++                _send_whatsapp(to, body, log)
++                total_msgs += 1
++        except Exception as e:
++            log.error(f"[internal-cron] error uid={uid}: {e}")
++    save_db(db)
++    return total_msgs
++
++def _start_internal_scheduler(log):
++    """Tenta iniciar APScheduler (minutário). Se indisponível, usa loop em thread."""
++    global _SCHED_STARTED
++    if _SCHED_STARTED or ENABLE_INTERNAL_CRON != "1":
++        return
++    try:
++        from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
++        scheduler = BackgroundScheduler(timezone=TZ)
++        scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*")
++        scheduler.start()
++        log.info("[scheduler] APScheduler iniciado (a cada 1 min)")
++    except Exception as e:
++        log.warning(f"[scheduler] APScheduler indisponível ({e}); usando loop em thread")
++        def _loop():
++            while True:
++                try:
++                    _run_cron_now(log)
++                except Exception as ex:
++                    log.error(f"[scheduler] loop error: {ex}")
++                time.sleep(60)
++        t = threading.Thread(target=_loop, daemon=True)
++        t.start()
++        log.info("[scheduler] Thread de agendamento iniciada (60s)")
++    _SCHED_STARTED = True
+@@
+ def create_app() -> Flask:
+     app = Flask(__name__)
+     app.url_map.strict_slashes = False
+
+     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+     log = logging.getLogger(APP_NAME)
++    # Inicia o agendador interno (sem depender de cron externo)
++    _start_internal_scheduler(log)
+@@
+     @app.route("/admin/cron", methods=["GET"])
+     def admin_cron():
+         """Chame esta rota 1x/h pela sua automação (Railway/cron) para disparar lembretes/check-ins."""
+-        db = load_db()
+-        users = db.get("users", {})
+-        total_msgs = 0
+-        for uid, u in users.items():
+-            try:
+-                payloads = _cron_payload_for(uid, u, log)
+-                for to, body in payloads:
+-                    _send_whatsapp(to, body, log)
+-                    total_msgs += 1
+-            except Exception as e:
+-                log.error(f"/admin/cron error uid={uid}: {e}")
+-        save_db(db)
++        total_msgs = _run_cron_now(log)
+         return Response(f"cron ok – sent={total_msgs}", 200, mimetype="text/plain")
