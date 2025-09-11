@@ -6,6 +6,9 @@ from datetime import datetime
 from typing import Optional, Dict, Any, Tuple, List
 from flask import Flask, request, Response
 
+# === Limite de caracteres por mensagem (WhatsApp/Twilio) ===
+WHATSAPP_CHAR_LIMIT = int(os.getenv("WA_CHAR_LIMIT", "1500"))  # margem de segurança < 1600
+
 # Twilio TwiML (fallback local) + envio opcional (REST)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
@@ -18,9 +21,12 @@ except Exception:  # pragma: no cover
     class _FakeMsg:
         def __init__(self, body: str): self.body = body
     class MessagingResponse:  # type: ignore
-        def __init__(self): self._m = None
-        def message(self, text: str): self._m = _FakeMsg(text); return self._m
-        def __str__(self): return getattr(self._m, "body", "")
+        def __init__(self): self._msgs = []
+        def message(self, text: str):
+            m = _FakeMsg(text); self._msgs.append(m); return m
+        def __str__(self):
+            # Fallback: devolve só a última mensagem (ambiente local)
+            return self._msgs[-1].body if self._msgs else ""
     TwilioClient = None
 
 # ===== OpenAI (Q&A) =====
@@ -68,7 +74,7 @@ def _compose_profile_context(data: Dict[str, Any]) -> str:
 def _ai_answer(question: str, data: Dict[str, Any]) -> Optional[str]:
     """Gera resposta de Q&A contextualizada. Retorna None se indisponível/erro."""
     cli = _ai_client()
-    if not cli: 
+    if not cli:
         return None
     system = (
         "Você é um coach de saúde e nutrição objetivo, didático e motivador. "
@@ -102,7 +108,7 @@ def _maybe_route_to_ai(text: str, step: int) -> bool:
     t = (text or "").strip().lower()
     if step >= 999:
         return True
-    if "?" in t: 
+    if "?" in t:
         return True
     gatilhos = ("duvida","dúvida","ajuda","pergunta")
     return any(t.startswith(g) for g in gatilhos)
@@ -186,20 +192,50 @@ def _parse_hh_range(s: str) -> Optional[Tuple[int,int]]:
         return None
 
 def _in_window(hour: int, A: int, B: int) -> bool:
-    """Retorna True se 'hour' está dentro da janela [A..B] inclusive, considerando A<=B.
-       Se A>B (não usual para feeding_window), considera janela vazia."""
+    """Retorna True se 'hour' está dentro da janela [A..B] inclusive, considerando A<=B."""
     if A <= B:
         return A <= hour <= B
     return False
 
 def _in_mute(hour: int, M: int, N: int) -> bool:
     """Silêncio pode cruzar meia-noite (ex.: 22–05)."""
-    if M == N:  # silêncio 24h (edge raro)
+    if M == N:
         return True
     if M < N:
         return M <= hour < N
     else:
         return hour >= M or hour < N
+
+# --------- Split seguro para WhatsApp ---------
+def _split_for_whatsapp(text: str, limit: int = WHATSAPP_CHAR_LIMIT) -> List[str]:
+    """Divide 'text' em pedaços <= limit, preferindo quebras limpas."""
+    if not text:
+        return [""]
+    text = text.strip()
+    if len(text) <= limit:
+        return [text]
+
+    parts: List[str] = []
+    rest = text
+    seps = ["\n\n", "\n", " "]
+
+    while len(rest) > limit:
+        cut = -1
+        # tenta cada separador do mais forte pro mais fraco
+        for sep in seps:
+            pos = rest.rfind(sep, 0, limit)
+            if pos > cut:
+                cut = pos
+        if cut <= 0:
+            cut = limit  # sem separador útil, corta seco
+
+        chunk = rest[:cut].rstrip()
+        parts.append(chunk)
+        rest = rest[cut:].lstrip()
+
+    if rest:
+        parts.append(rest)
+    return parts
 
 # Mapas de faixas → valores estimados (para cálculos)
 AGE_MAP = {
@@ -249,17 +285,24 @@ def _twilio_client():
     return None
 
 def _send_whatsapp(to_num: str, body: str, log) -> bool:
+    """Envia com split automático em múltiplas mensagens se necessário."""
     cli = _twilio_client()
+    chunks = _split_for_whatsapp(body, WHATSAPP_CHAR_LIMIT)
+
     if not cli:
-        log.info(f"[send] (dry-run) to={to_num} body={body[:90]}...")
+        for idx, ch in enumerate(chunks, 1):
+            log.info(f"[send DRY] to={to_num} part={idx}/{len(chunks)} len={len(ch)} body={ch[:90]}...")
         return False
-    try:
-        cli.messages.create(from_=TWILIO_FROM, to=to_num, body=body)
-        log.info(f"[send] OK to={to_num}")
-        return True
-    except Exception as e:
-        log.error(f"[send] FAIL to={to_num}: {e}")
-        return False
+
+    ok = True
+    for idx, ch in enumerate(chunks, 1):
+        try:
+            cli.messages.create(from_=TWILIO_FROM, to=to_num, body=ch)
+            log.info(f"[send] OK to={to_num} part={idx}/{len(chunks)} len={len(ch)}")
+        except Exception as e:
+            log.error(f"[send] FAIL to={to_num} part={idx}/{len(chunks)}: {e}")
+            ok = False
+    return ok
 
 # ===================== Cálculos de Nutrição =====================
 def _calc_tmb_mifflin(sexo: str, peso_kg: float, altura_cm: float, idade: int) -> float:
@@ -384,7 +427,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
     # ---- Step 0 → Q0 (saudação + NOME)
     if step == 0:
         if text not in START_WORDS:
-            # Se o usuário chegar fazendo pergunta logo de cara:
             if _maybe_route_to_ai(text, step):
                 ai = _ai_answer(body, data)
                 if ai:
@@ -437,7 +479,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         return "**Q2b. Qual sua idade EXATA (número)?**"
 
     if step == 4:
-        # idade exata opcional (se inválida, fica com estimada)
         try:
             idade_exata = int("".join(ch for ch in (body or "") if ch.isdigit()))
         except Exception:
@@ -557,7 +598,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             fotos.extend(media_urls[:3])
             data["fotos"] = fotos
             st["data"] = data
-            # após fotos → Q8a (treino)
             st["step"] = 100; users[uid] = st; save_db(db)
             return (
                 "✅ Fotos recebidas.\n\n"
@@ -579,7 +619,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
 
     # ===================== Q8a/Q8b/Q8c (perfil de alertas) =====================
     if step == 100:
-        # Treino
         opt = text
         map_opt = {"1":6,"2":12,"3":17,"4":18,"5":19,"6":20}
         if opt in map_opt:
@@ -589,7 +628,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         elif opt == "8":
             return "Digite a hora do treino (0–23), número inteiro."
         else:
-            # pode ter digitado direto a hora
             try:
                 h = _clamp_hour(int(opt))
                 data["training_hour"] = h
@@ -603,7 +641,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         )
 
     if step == 101:
-        # feeding_window
         preset = {"1":(8,20), "2":(7,21), "3":(6,22), "4":(10,18)}
         if text in preset:
             data["feeding_window"] = list(preset[text])
@@ -620,7 +657,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         )
 
     if step == 102:
-        # mute_hours (pode cruzar meia-noite)
         if text == "4":
             data["mute_hours"] = None
         elif text in {"1","2","3"}:
@@ -632,7 +668,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
                 return "❗ Formato inválido. Envie HH–HH (ex.: 22–05) ou escolha 1–4."
             data["mute_hours"] = [rng[0], rng[1]]
         st["data"] = data; st["step"] = 11; users[uid] = st; save_db(db)
-        # segue para confirmação como antes:
         nome = data.get("nome","")
         return (
             "✅ *Resumo rápido*\n"
@@ -709,7 +744,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         agua_noite = round(agua_l * 0.30, 1)
         data.update({"agua_l": agua_l, "agua_split": {"manhã": agua_manha, "tarde": agua_tarde, "noite": agua_noite}})
 
-        # Treino ABC (fixo neste roteiro)
         treino_txt = (
             "🏋️ *Treino (ABC sugerido)*\n"
             "A: Peito, Ombro, Tríceps\n"
@@ -718,7 +752,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             "Frequência: 3x/sem (ABC) ou 6x/sem (ABC duas vezes)\n"
         )
 
-        # Split por refeição (labels completos)
         linhas_split = []
         for i in range(1, meals+1):
             k = f"Ref {i}"
@@ -739,6 +772,7 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
         users[uid] = st
         save_db(db)
 
+        # Texto único (será splitado na camada TwiML/REST)
         return (
             f"🔥 *Plano Inicial — {nome} ({idade} anos)*\n\n"
             f"Calorias: {data['calorias']} kcal/dia\n"
@@ -765,7 +799,6 @@ def build_reply(body: str, sender: str, waid: Optional[str], media_urls: Optiona
             users[uid] = st; save_db(db)
             return "▶️ Lembretes reativados. Você receberá mensagens ao longo do dia."
 
-        # Q&A como padrão pós-fluxo
         ai = _ai_answer(body, data)
         if ai:
             return ai
@@ -808,7 +841,6 @@ def _force_post_workout(meals: List[int], A: int, B: int, T: Optional[int]) -> L
     if not _in_window(T, A, B): return sorted(meals)
     target = min(B, T+1)
     if target in meals: return sorted(meals)
-    # mover a refeição mais próxima para target
     if not meals: return [target]
     idx = min(range(len(meals)), key=lambda i: abs(meals[i]-target))
     meals[idx] = target
@@ -822,14 +854,12 @@ def _water_slots(meals: List[int], A: int, B: int, avoid: set, need: int = 3) ->
         for i in range(len(m)-1):
             mid = int(round((m[i]+m[i+1])/2))
             if _in_window(mid, A, B): cand.append(mid)
-    # se faltar, preenche por terços da janela
     while len(cand) < need and A <= B:
         slots = [int(round(A + (B-A)*p)) for p in [1/4, 2/4, 3/4]]
         for s in slots:
             if len(cand) >= need: break
             if _in_window(s, A, B): cand.append(s)
         break
-    # dedup e corta tamanho
     seen=set(); out=[]
     for h in cand:
         if h not in seen and h not in avoid:
@@ -859,7 +889,6 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
     hour = now.hour
     weekday = now.weekday()
 
-    # Perfil
     fw = data.get("feeding_window", [8,20])
     A, B = int(fw[0]), int(fw[1])
     meal_count = int(data.get("meal_count", 4))
@@ -881,16 +910,13 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
 
     out: List[Tuple[str, str]] = []
 
-    # Refeições (por janela/Q9), garantindo 1 pós-treino se T∈[A,B]
     meals = _distribute_meal_hours(A, B, meal_count)
     meals = _force_post_workout(meals, A, B, T)
     meals = sorted(h for h in meals if not_muted(h))
 
-    # Água (3 pings entre refeições)
     water = _water_slots(meals, A, B, avoid=set(meals), need=3)
     water = [h for h in water if not_muted(h)]
 
-    # Treino (T−1/T+1), independentemente da janela de alimentação, mas respeita mute
     pre = post = None
     if T is not None:
         pre = _clamp_hour(T-1)
@@ -899,18 +925,14 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
     if pre is not None and not_muted(pre): train_slots.append(("pretreino", pre))
     if post is not None and not_muted(post): train_slots.append(("pos_treino", post))
 
-    # Envio: só na hora exata (cron 1x/h)
-    # Refeições
     for i, h in enumerate(meals, start=1):
         if h == hour and _should_send(last, f"meal_{h}", now, h):
             out.append((to_num, f"🍽️ *Refeição {i}* agora ({h:02d}:00). Mantenha as porções do plano."))
 
-    # Água
     for j, h in enumerate(water, start=1):
         if h == hour and _should_send(last, f"agua_{h}", now, h):
             out.append((to_num, "💧 Lembrete de água. Pequenos goles agora. Meta diária em andamento."))
 
-    # Treino
     for tag, h in train_slots:
         if h == hour and _should_send(last, f"{tag}_{h}", now, h):
             if tag == "pretreino":
@@ -918,7 +940,6 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
             else:
                 out.append((to_num, "✅ Pós-treino (T+1h): proteína + carbo limpo. Marca no app como feito."))
 
-    # Check-in semanal (segunda >= 08h)
     ck_key = "checkin"
     ck_mark = last.get(ck_key)
     if weekday == WEEKDAY_CHECKIN and hour >= 8:
@@ -931,7 +952,6 @@ def _cron_payload_for(uid: str, u: Dict[str, Any], log) -> List[Tuple[str, str]]
                 "Responda aqui que ajusto suas calorias/macros se precisar."
             ))
 
-    # persistir last
     u.setdefault("schedule", {})["last"] = last
     return out
 
@@ -963,7 +983,6 @@ def _start_internal_scheduler(log):
     try:
         from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore
         scheduler = BackgroundScheduler(timezone=TZ)
-        # Para teste: a cada 3 minutos
         scheduler.add_job(lambda: _run_cron_now(log), "cron", minute="*/3")
         scheduler.start()
         log.info("[scheduler] APScheduler iniciado (a cada 3 min)")
@@ -989,7 +1008,6 @@ def create_app() -> Flask:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     log = logging.getLogger(APP_NAME)
 
-    # Inicia o agendador interno (sem depender de cron externo)
     _start_internal_scheduler(log)
 
     @app.route("/", methods=["GET"])
@@ -1006,7 +1024,6 @@ def create_app() -> Flask:
 
     @app.route("/admin/cron", methods=["GET"])
     def admin_cron():
-        """Executa manualmente o job (útil para teste ou cron externo)."""
         total_msgs = _run_cron_now(log)
         return Response(f"cron ok - sent={total_msgs}", 200, mimetype="text/plain")
 
@@ -1032,7 +1049,7 @@ def create_app() -> Flask:
                 if url:
                     media_urls.append(url)
 
-        log.info(f"POST /bot <- From={sender} WaId={waid} Body='{body}' Media={len(media_urls)}")
+        log.info(f"POST /bot <- From={sender} WaId={waid} BodyLen={len(body)} Media={len(media_urls)}")
 
         # lembrar destino para cron
         try:
@@ -1051,10 +1068,12 @@ def create_app() -> Flask:
             app.logger.exception(f"Erro no build_reply: {e}")
             reply_text = "⚠️ Tive um erro aqui. Mande **reiniciar** ou **oi** para seguir."
 
-        log.info("POST /bot -> Reply='%s...'", (reply_text or "")[:180].replace("\n"," "))
+        chunks = _split_for_whatsapp(reply_text, WHATSAPP_CHAR_LIMIT)
+        log.info("POST /bot -> ReplyParts=%d totalLen=%d", len(chunks), sum(len(c) for c in chunks))
 
         twiml = MessagingResponse()
-        twiml.message(reply_text)
+        for ch in chunks:
+            twiml.message(ch)
         return Response(str(twiml), 200, mimetype="application/xml; charset=utf-8")
 
     @app.errorhandler(404)
